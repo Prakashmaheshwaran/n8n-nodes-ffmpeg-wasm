@@ -19,7 +19,11 @@ type OperationType =
   | "rotate"
   | "audioMix"
   | "audioFilters"
-  | "audioNormalize";
+  | "audioNormalize"
+  | "overlay"
+  | "subtitle"
+  | "gif"
+  | "imageSequence";
 
 export class FFmpegWasm implements INodeType {
   description: INodeTypeDescription = {
@@ -125,6 +129,31 @@ export class FFmpegWasm implements INodeType {
             value: "audioNormalize",
             description: "Normalize audio levels to target loudness",
             action: "Normalize audio",
+          },
+          {
+            name: "Video Overlay",
+            value: "overlay",
+            description:
+              "Overlay video/image as watermark or picture-in-picture",
+            action: "Overlay video or image",
+          },
+          {
+            name: "Subtitle Burn-in",
+            value: "subtitle",
+            description: "Burn subtitles into video",
+            action: "Burn subtitles into video",
+          },
+          {
+            name: "GIF/WebP Animation",
+            value: "gif",
+            description: "Create animated GIF or WebP from video",
+            action: "Create GIF or WebP animation",
+          },
+          {
+            name: "Image Sequence Export",
+            value: "imageSequence",
+            description: "Export video frames as image sequence",
+            action: "Export video to image sequence",
           },
         ],
         default: "convert",
@@ -711,6 +740,420 @@ export class FFmpegWasm implements INodeType {
         },
         default: "mp3",
         description: "Output audio format",
+      },
+      // Video Overlay options
+      {
+        displayName: "Overlay Binary Property",
+        name: "overlayBinaryProperty",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["overlay"],
+          },
+        },
+        default: "overlay",
+        description: "Name of binary property containing overlay image/video",
+        required: true,
+      },
+      {
+        displayName: "Overlay Type",
+        name: "overlayType",
+        type: "options",
+        displayOptions: {
+          show: {
+            operation: ["overlay"],
+          },
+        },
+        options: [
+          { name: "Watermark (Image)", value: "watermark" },
+          { name: "Picture-in-Picture (Video)", value: "pip" },
+        ],
+        default: "watermark",
+        description: "Type of overlay to apply",
+        required: true,
+      },
+      {
+        displayName: "Position X",
+        name: "overlayX",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["overlay"],
+          },
+        },
+        default: "10",
+        description: "X position (pixels or expressions like W-w-10)",
+      },
+      {
+        displayName: "Position Y",
+        name: "overlayY",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["overlay"],
+          },
+        },
+        default: "10",
+        description: "Y position (pixels or expressions like H-h-10)",
+      },
+      {
+        displayName: "Overlay Width",
+        name: "overlayWidth",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["overlay"],
+          },
+        },
+        default: -1,
+        description: "Overlay width (-1 for original size)",
+      },
+      {
+        displayName: "Overlay Height",
+        name: "overlayHeight",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["overlay"],
+          },
+        },
+        default: -1,
+        description: "Overlay height (-1 for original size)",
+      },
+      {
+        displayName: "Opacity",
+        name: "overlayOpacity",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["overlay"],
+          },
+        },
+        default: 1.0,
+        description: "Overlay opacity (0.0 to 1.0)",
+      },
+      {
+        displayName: "Output Format",
+        name: "overlayOutputFormat",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["overlay"],
+          },
+        },
+        default: "mp4",
+        description: "Output file format",
+      },
+      // Subtitle Burn-in options
+      {
+        displayName: "Subtitle Binary Property",
+        name: "subtitleBinaryProperty",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["subtitle"],
+          },
+        },
+        default: "subtitle",
+        description:
+          "Name of binary property containing subtitle file (SRT, ASS, VTT)",
+        required: true,
+      },
+      {
+        displayName: "Subtitle Format",
+        name: "subtitleFormat",
+        type: "options",
+        displayOptions: {
+          show: {
+            operation: ["subtitle"],
+          },
+        },
+        options: [
+          { name: "SRT", value: "srt" },
+          { name: "ASS/SSA", value: "ass" },
+          { name: "WebVTT", value: "vtt" },
+        ],
+        default: "srt",
+        description: "Format of the subtitle file",
+        required: true,
+      },
+      {
+        displayName: "Font Size",
+        name: "subtitleFontSize",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["subtitle"],
+          },
+        },
+        default: 24,
+        description: "Font size for subtitles",
+      },
+      {
+        displayName: "Font Color",
+        name: "subtitleFontColor",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["subtitle"],
+          },
+        },
+        default: "white",
+        description: "Font color (white, yellow, red, etc. or hex #FFFFFF)",
+      },
+      {
+        displayName: "Background Opacity",
+        name: "subtitleBgOpacity",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["subtitle"],
+          },
+        },
+        default: 0.5,
+        description: "Background box opacity (0.0 to 1.0, 0 for transparent)",
+      },
+      {
+        displayName: "Position",
+        name: "subtitlePosition",
+        type: "options",
+        displayOptions: {
+          show: {
+            operation: ["subtitle"],
+          },
+        },
+        options: [
+          { name: "Bottom", value: "bottom" },
+          { name: "Top", value: "top" },
+          { name: "Center", value: "center" },
+        ],
+        default: "bottom",
+        description: "Vertical position of subtitles",
+      },
+      {
+        displayName: "Output Format",
+        name: "subtitleOutputFormat",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["subtitle"],
+          },
+        },
+        default: "mp4",
+        description: "Output file format",
+      },
+      // GIF/WebP Animation options
+      {
+        displayName: "Output Format",
+        name: "gifOutputFormat",
+        type: "options",
+        displayOptions: {
+          show: {
+            operation: ["gif"],
+          },
+        },
+        options: [
+          { name: "GIF", value: "gif" },
+          { name: "WebP", value: "webp" },
+        ],
+        default: "gif",
+        description: "Output animation format",
+        required: true,
+      },
+      {
+        displayName: "Width",
+        name: "gifWidth",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["gif"],
+          },
+        },
+        default: 480,
+        description: "Output width in pixels (-1 for auto)",
+      },
+      {
+        displayName: "Height",
+        name: "gifHeight",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["gif"],
+          },
+        },
+        default: -1,
+        description: "Output height in pixels (-1 for auto)",
+      },
+      {
+        displayName: "Frame Rate",
+        name: "gifFps",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["gif"],
+          },
+        },
+        default: 10,
+        description: "Frames per second for animation",
+      },
+      {
+        displayName: "Start Time",
+        name: "gifStartTime",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["gif"],
+          },
+        },
+        default: "00:00:00",
+        description: "Start time for animation (HH:MM:SS or seconds)",
+      },
+      {
+        displayName: "Duration",
+        name: "gifDuration",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["gif"],
+          },
+        },
+        default: "5",
+        description: "Duration of animation in seconds",
+      },
+      {
+        displayName: "Color Palette",
+        name: "gifColors",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["gif"],
+          },
+        },
+        default: 128,
+        description:
+          "Number of colors in palette (2-256, higher = better quality)",
+      },
+      {
+        displayName: "Dither",
+        name: "gifDither",
+        type: "options",
+        displayOptions: {
+          show: {
+            operation: ["gif"],
+          },
+        },
+        options: [
+          { name: "None", value: "none" },
+          { name: "Bayer", value: "bayer" },
+          { name: "Floyd-Steinberg", value: "floyd_steinberg" },
+        ],
+        default: "bayer",
+        description: "Dithering algorithm for color reduction",
+      },
+      {
+        displayName: "Loop",
+        name: "gifLoop",
+        type: "boolean",
+        displayOptions: {
+          show: {
+            operation: ["gif"],
+          },
+        },
+        default: true,
+        description: "Whether to loop animation infinitely",
+      },
+      // Image Sequence Export options
+      {
+        displayName: "Output Format",
+        name: "sequenceOutputFormat",
+        type: "options",
+        displayOptions: {
+          show: {
+            operation: ["imageSequence"],
+          },
+        },
+        options: [
+          { name: "PNG", value: "png" },
+          { name: "JPEG", value: "jpg" },
+          { name: "WebP", value: "webp" },
+        ],
+        default: "jpg",
+        description: "Output image format",
+        required: true,
+      },
+      {
+        displayName: "Width",
+        name: "sequenceWidth",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["imageSequence"],
+          },
+        },
+        default: -1,
+        description: "Output width in pixels (-1 for original)",
+      },
+      {
+        displayName: "Height",
+        name: "sequenceHeight",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["imageSequence"],
+          },
+        },
+        default: -1,
+        description: "Output height in pixels (-1 for original)",
+      },
+      {
+        displayName: "Frame Rate",
+        name: "sequenceFps",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["imageSequence"],
+          },
+        },
+        default: 1,
+        description:
+          "Extract one frame every N seconds (fps=1 means 1 frame/sec)",
+      },
+      {
+        displayName: "Start Time",
+        name: "sequenceStartTime",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["imageSequence"],
+          },
+        },
+        default: "00:00:00",
+        description: "Start time for extraction (HH:MM:SS or seconds)",
+      },
+      {
+        displayName: "Duration",
+        name: "sequenceDuration",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["imageSequence"],
+          },
+        },
+        default: "",
+        description:
+          "Duration to extract (seconds). Leave empty for entire video",
+      },
+      {
+        displayName: "Quality (JPEG/WebP)",
+        name: "sequenceQuality",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["imageSequence"],
+          },
+        },
+        default: 90,
+        description: "JPEG/WebP quality (1-100)",
       },
       // Additional options
       {
@@ -1337,6 +1780,315 @@ export class FFmpegWasm implements INodeType {
                 "-y",
                 outputName,
               ];
+              break;
+            }
+            case "overlay": {
+              const overlayBinaryProperty = this.getNodeParameter(
+                "overlayBinaryProperty",
+                i
+              ) as string;
+              const overlayType = this.getNodeParameter(
+                "overlayType",
+                i
+              ) as string;
+              const overlayX = this.getNodeParameter("overlayX", i) as string;
+              const overlayY = this.getNodeParameter("overlayY", i) as string;
+              const overlayWidth = this.getNodeParameter(
+                "overlayWidth",
+                i
+              ) as number;
+              const overlayHeight = this.getNodeParameter(
+                "overlayHeight",
+                i
+              ) as number;
+              const overlayOpacity = this.getNodeParameter(
+                "overlayOpacity",
+                i
+              ) as number;
+              const overlayOutputFormat = this.getNodeParameter(
+                "overlayOutputFormat",
+                i
+              ) as string;
+
+              // Get overlay binary data
+              const overlayData = await this.helpers.getBinaryDataBuffer(
+                i,
+                overlayBinaryProperty
+              );
+              const overlayFilename = `overlay_${i}_${Date.now()}`;
+              await ffmpeg.writeFile(overlayFilename, overlayData);
+
+              outputExt = overlayOutputFormat.startsWith(".")
+                ? overlayOutputFormat
+                : `.${overlayOutputFormat}`;
+              const outputName = `${outputFilename}${outputExt}`;
+
+              // Build overlay filter
+              let overlayFilter = "";
+              if (overlayWidth > 0 || overlayHeight > 0) {
+                const widthStr =
+                  overlayWidth > 0 ? overlayWidth.toString() : "-1";
+                const heightStr =
+                  overlayHeight > 0 ? overlayHeight.toString() : "-1";
+                overlayFilter = `[1:v]scale=${widthStr}:${heightStr}`;
+                if (overlayOpacity < 1.0) {
+                  overlayFilter += `,format=rgba,colorchannelmixer=aa=${overlayOpacity}`;
+                }
+                overlayFilter += `[ovrl];[0:v][ovrl]overlay=${overlayX}:${overlayY}`;
+              } else {
+                if (overlayOpacity < 1.0) {
+                  overlayFilter = `[1:v]format=rgba,colorchannelmixer=aa=${overlayOpacity}[ovrl];[0:v][ovrl]overlay=${overlayX}:${overlayY}`;
+                } else {
+                  overlayFilter = `overlay=${overlayX}:${overlayY}`;
+                }
+              }
+
+              if (overlayType === "pip") {
+                // For PiP, we want to keep both audio tracks
+                ffmpegCommand = [
+                  "-i",
+                  inputFilename,
+                  "-i",
+                  overlayFilename,
+                  "-filter_complex",
+                  overlayFilter,
+                  "-c:a",
+                  "copy",
+                  "-y",
+                  outputName,
+                ];
+              } else {
+                // For watermark, just use main audio
+                ffmpegCommand = [
+                  "-i",
+                  inputFilename,
+                  "-i",
+                  overlayFilename,
+                  "-filter_complex",
+                  overlayFilter,
+                  "-c:a",
+                  "copy",
+                  "-y",
+                  outputName,
+                ];
+              }
+              break;
+            }
+            case "subtitle": {
+              const subtitleBinaryProperty = this.getNodeParameter(
+                "subtitleBinaryProperty",
+                i
+              ) as string;
+              const subtitleFormat = this.getNodeParameter(
+                "subtitleFormat",
+                i
+              ) as string;
+              const subtitleFontSize = this.getNodeParameter(
+                "subtitleFontSize",
+                i
+              ) as number;
+              const subtitleFontColor = this.getNodeParameter(
+                "subtitleFontColor",
+                i
+              ) as string;
+              const subtitleBgOpacity = this.getNodeParameter(
+                "subtitleBgOpacity",
+                i
+              ) as number;
+              const subtitlePosition = this.getNodeParameter(
+                "subtitlePosition",
+                i
+              ) as string;
+              const subtitleOutputFormat = this.getNodeParameter(
+                "subtitleOutputFormat",
+                i
+              ) as string;
+
+              // Get subtitle binary data
+              const subtitleData = await this.helpers.getBinaryDataBuffer(
+                i,
+                subtitleBinaryProperty
+              );
+              const subtitleFilename = `subtitle_${i}_${Date.now()}.${subtitleFormat}`;
+              await ffmpeg.writeFile(subtitleFilename, subtitleData);
+
+              outputExt = subtitleOutputFormat.startsWith(".")
+                ? subtitleOutputFormat
+                : `.${subtitleOutputFormat}`;
+              const outputName = `${outputFilename}${outputExt}`;
+
+              // Convert color to FFmpeg format
+              let fontColor = subtitleFontColor;
+              if (fontColor.startsWith("#")) {
+                fontColor = fontColor.substring(1);
+              }
+
+              // Determine alignment based on position (2=bottom, 6=top, 5=center)
+              let alignment = "2";
+              if (subtitlePosition === "top") {
+                alignment = "6";
+              } else if (subtitlePosition === "center") {
+                alignment = "5";
+              }
+
+              let subtitleFilter = "";
+
+              // Add box if opacity > 0
+              if (subtitleBgOpacity > 0) {
+                const alphaHex = Math.round(subtitleBgOpacity * 255)
+                  .toString(16)
+                  .padStart(2, "0");
+                subtitleFilter = `subtitles=${subtitleFilename}:force_style='FontSize=${subtitleFontSize},PrimaryColour=&H${fontColor},Alignment=${alignment},OutlineColour=&H000000,Outline=1,BorderStyle=4,BackColour=&H${alphaHex}000000'`;
+              } else {
+                subtitleFilter = `subtitles=${subtitleFilename}:force_style='FontSize=${subtitleFontSize},PrimaryColour=&H${fontColor},Alignment=${alignment}'`;
+              }
+
+              ffmpegCommand = [
+                "-i",
+                inputFilename,
+                "-vf",
+                subtitleFilter,
+                "-c:a",
+                "copy",
+                "-y",
+                outputName,
+              ];
+              break;
+            }
+            case "gif": {
+              const gifOutputFormat = this.getNodeParameter(
+                "gifOutputFormat",
+                i
+              ) as string;
+              const gifWidth = this.getNodeParameter("gifWidth", i) as number;
+              const gifHeight = this.getNodeParameter("gifHeight", i) as number;
+              const gifFps = this.getNodeParameter("gifFps", i) as number;
+              const gifStartTime = this.getNodeParameter(
+                "gifStartTime",
+                i
+              ) as string;
+              const gifDuration = this.getNodeParameter(
+                "gifDuration",
+                i
+              ) as string;
+              const gifColors = this.getNodeParameter("gifColors", i) as number;
+              const gifDither = this.getNodeParameter("gifDither", i) as string;
+              const gifLoop = this.getNodeParameter("gifLoop", i) as boolean;
+
+              outputExt = `.${gifOutputFormat}`;
+              const outputName = `${outputFilename}${outputExt}`;
+
+              // Build scale filter
+              const widthStr = gifWidth > 0 ? gifWidth.toString() : "-1";
+              const heightStr = gifHeight > 0 ? gifHeight.toString() : "-1";
+              const scaleFilter = `fps=${gifFps},scale=${widthStr}:${heightStr}:flags=lanczos`;
+
+              if (gifOutputFormat === "gif") {
+                // GIF with optimized palette
+                const loopValue = gifLoop ? "0" : "-1";
+                let gifFilter = `${scaleFilter},split[s0][s1];[s0]palettegen=${gifColors}[p];[s1][p]paletteuse=dither=${gifDither}`;
+
+                ffmpegCommand = [
+                  "-ss",
+                  gifStartTime,
+                  "-t",
+                  gifDuration,
+                  "-i",
+                  inputFilename,
+                  "-vf",
+                  gifFilter,
+                  "-loop",
+                  loopValue,
+                  "-y",
+                  outputName,
+                ];
+              } else {
+                // WebP animation
+                const loopValue = gifLoop ? "0" : "1";
+                ffmpegCommand = [
+                  "-ss",
+                  gifStartTime,
+                  "-t",
+                  gifDuration,
+                  "-i",
+                  inputFilename,
+                  "-vf",
+                  scaleFilter,
+                  "-loop",
+                  loopValue,
+                  "-y",
+                  outputName,
+                ];
+              }
+              break;
+            }
+            case "imageSequence": {
+              const sequenceOutputFormat = this.getNodeParameter(
+                "sequenceOutputFormat",
+                i
+              ) as string;
+              const sequenceWidth = this.getNodeParameter(
+                "sequenceWidth",
+                i
+              ) as number;
+              const sequenceHeight = this.getNodeParameter(
+                "sequenceHeight",
+                i
+              ) as number;
+              const sequenceFps = this.getNodeParameter(
+                "sequenceFps",
+                i
+              ) as number;
+              const sequenceStartTime = this.getNodeParameter(
+                "sequenceStartTime",
+                i
+              ) as string;
+              const sequenceDuration = this.getNodeParameter(
+                "sequenceDuration",
+                i
+              ) as string;
+              const sequenceQuality = this.getNodeParameter(
+                "sequenceQuality",
+                i
+              ) as number;
+
+              const outputPattern = `frame_%04d.${sequenceOutputFormat}`;
+
+              // Build scale filter
+              const widthStr =
+                sequenceWidth > 0 ? sequenceWidth.toString() : "-1";
+              const heightStr =
+                sequenceHeight > 0 ? sequenceHeight.toString() : "-1";
+              let vfFilter = `fps=1/${sequenceFps},scale=${widthStr}:${heightStr}`;
+
+              // Prepare command
+              const cmdArgs: string[] = ["-ss", sequenceStartTime];
+
+              if (sequenceDuration && sequenceDuration.length > 0) {
+                cmdArgs.push("-t", sequenceDuration);
+              }
+
+              cmdArgs.push("-i", inputFilename, "-vf", vfFilter);
+
+              // Add quality settings for lossy formats
+              if (
+                sequenceOutputFormat === "jpg" ||
+                sequenceOutputFormat === "jpeg"
+              ) {
+                cmdArgs.push(
+                  "-q:v",
+                  Math.round(((100 - sequenceQuality) / 100) * 31).toString()
+                );
+              } else if (sequenceOutputFormat === "webp") {
+                cmdArgs.push("-q:v", sequenceQuality.toString());
+              }
+
+              cmdArgs.push("-y", outputPattern);
+              ffmpegCommand = cmdArgs;
+
+              // Note: For image sequence, output will be multiple files
+              // We'll need to handle this differently
+              outputExt = `.${sequenceOutputFormat}`;
               break;
             }
             default:
