@@ -12,7 +12,11 @@ type OperationType =
   | "resize"
   | "thumbnail"
   | "custom"
-  | "merge";
+  | "merge"
+  | "trim"
+  | "videoFilters"
+  | "speed"
+  | "rotate";
 
 export class FFmpegWasm implements INodeType {
   description: INodeTypeDescription = {
@@ -76,6 +80,30 @@ export class FFmpegWasm implements INodeType {
             value: "merge",
             description: "Merge multiple videos into one",
             action: "Merge videos",
+          },
+          {
+            name: "Trim/Cut Video",
+            value: "trim",
+            description: "Trim or cut video to specific time range",
+            action: "Trim video",
+          },
+          {
+            name: "Video Filters",
+            value: "videoFilters",
+            description: "Apply video filters like brightness, contrast, blur",
+            action: "Apply video filters",
+          },
+          {
+            name: "Speed Adjustment",
+            value: "speed",
+            description: "Adjust video playback speed",
+            action: "Adjust speed",
+          },
+          {
+            name: "Rotate/Flip Video",
+            value: "rotate",
+            description: "Rotate or flip video orientation",
+            action: "Rotate video",
           },
         ],
         default: "convert",
@@ -294,6 +322,238 @@ export class FFmpegWasm implements INodeType {
         default: false,
         description: "Whether to add a fade transition between videos",
       },
+      // Trim video options
+      {
+        displayName: "Start Time",
+        name: "startTime",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["trim"],
+          },
+        },
+        default: "00:00:00",
+        placeholder: "00:00:10 or 10",
+        description: "Start time for trimming (HH:MM:SS or seconds)",
+        required: true,
+      },
+      {
+        displayName: "End Time",
+        name: "endTime",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["trim"],
+          },
+        },
+        default: "",
+        placeholder: "00:01:00 or 60",
+        description:
+          "End time for trimming (HH:MM:SS or seconds). Leave empty to trim to end",
+      },
+      {
+        displayName: "Duration",
+        name: "duration",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["trim"],
+          },
+        },
+        default: "",
+        placeholder: "00:00:30 or 30",
+        description:
+          "Duration to trim (HH:MM:SS or seconds). Alternative to End Time",
+      },
+      // Video filters options
+      {
+        displayName: "Brightness",
+        name: "brightness",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["videoFilters"],
+          },
+        },
+        default: 0,
+        description: "Adjust brightness (-1.0 to 1.0, 0 is default)",
+      },
+      {
+        displayName: "Contrast",
+        name: "contrast",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["videoFilters"],
+          },
+        },
+        default: 1,
+        description: "Adjust contrast (0.0 to 2.0, 1.0 is default)",
+      },
+      {
+        displayName: "Saturation",
+        name: "saturation",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["videoFilters"],
+          },
+        },
+        default: 1,
+        description: "Adjust saturation (0.0 to 3.0, 1.0 is default)",
+      },
+      {
+        displayName: "Blur",
+        name: "blur",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["videoFilters"],
+          },
+        },
+        default: 0,
+        description: "Apply Gaussian blur (0 to 10, 0 is no blur)",
+      },
+      {
+        displayName: "Grayscale",
+        name: "grayscale",
+        type: "boolean",
+        displayOptions: {
+          show: {
+            operation: ["videoFilters"],
+          },
+        },
+        default: false,
+        description: "Whether to convert video to grayscale",
+      },
+      {
+        displayName: "Sepia",
+        name: "sepia",
+        type: "boolean",
+        displayOptions: {
+          show: {
+            operation: ["videoFilters"],
+          },
+        },
+        default: false,
+        description: "Whether to apply sepia effect",
+      },
+      {
+        displayName: "Output Format",
+        name: "filtersOutputFormat",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["videoFilters"],
+          },
+        },
+        default: "mp4",
+        description: "Output file format",
+      },
+      // Speed adjustment options
+      {
+        displayName: "Speed",
+        name: "speedValue",
+        type: "options",
+        displayOptions: {
+          show: {
+            operation: ["speed"],
+          },
+        },
+        options: [
+          { name: "0.25x (Very Slow)", value: "0.25" },
+          { name: "0.5x (Slow)", value: "0.5" },
+          { name: "0.75x (Slightly Slow)", value: "0.75" },
+          { name: "1x (Normal)", value: "1" },
+          { name: "1.25x (Slightly Fast)", value: "1.25" },
+          { name: "1.5x (Fast)", value: "1.5" },
+          { name: "2x (Double Speed)", value: "2" },
+          { name: "4x (Quadruple Speed)", value: "4" },
+        ],
+        default: "1",
+        description: "Playback speed multiplier",
+        required: true,
+      },
+      {
+        displayName: "Adjust Audio Pitch",
+        name: "adjustAudioPitch",
+        type: "boolean",
+        displayOptions: {
+          show: {
+            operation: ["speed"],
+          },
+        },
+        default: true,
+        description:
+          "Whether to adjust audio pitch to match speed (recommended)",
+      },
+      {
+        displayName: "Output Format",
+        name: "speedOutputFormat",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["speed"],
+          },
+        },
+        default: "mp4",
+        description: "Output file format",
+      },
+      // Rotate/Flip options
+      {
+        displayName: "Rotation",
+        name: "rotation",
+        type: "options",
+        displayOptions: {
+          show: {
+            operation: ["rotate"],
+          },
+        },
+        options: [
+          { name: "90 degrees clockwise", value: "90" },
+          { name: "90 degrees counter-clockwise", value: "270" },
+          { name: "180 degrees", value: "180" },
+          { name: "No rotation", value: "0" },
+        ],
+        default: "90",
+        description: "Rotate video by specified degrees",
+      },
+      {
+        displayName: "Flip Horizontal",
+        name: "flipHorizontal",
+        type: "boolean",
+        displayOptions: {
+          show: {
+            operation: ["rotate"],
+          },
+        },
+        default: false,
+        description: "Whether to flip video horizontally",
+      },
+      {
+        displayName: "Flip Vertical",
+        name: "flipVertical",
+        type: "boolean",
+        displayOptions: {
+          show: {
+            operation: ["rotate"],
+          },
+        },
+        default: false,
+        description: "Whether to flip video vertically",
+      },
+      {
+        displayName: "Output Format",
+        name: "rotateOutputFormat",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["rotate"],
+          },
+        },
+        default: "mp4",
+        description: "Output file format",
+      },
       // Additional options
       {
         displayName: "Additional Options",
@@ -336,20 +596,20 @@ export class FFmpegWasm implements INodeType {
         try {
           const binaryPropertyName = this.getNodeParameter(
             "binaryPropertyName",
-            i,
+            i
           ) as string;
           const outputBinaryPropertyName = this.getNodeParameter(
             "outputBinaryPropertyName",
-            i,
+            i
           ) as string;
           const operation = this.getNodeParameter(
             "operation",
-            i,
+            i
           ) as OperationType;
           const additionalOptions = this.getNodeParameter(
             "additionalOptions",
             i,
-            {},
+            {}
           ) as {
             timeout?: number;
             enableLogging?: boolean;
@@ -359,7 +619,7 @@ export class FFmpegWasm implements INodeType {
           const binaryData = items[i].binary?.[binaryPropertyName];
           if (!binaryData) {
             throw new Error(
-              `Binary data property "${binaryPropertyName}" not found`,
+              `Binary data property "${binaryPropertyName}" not found`
             );
           }
 
@@ -370,7 +630,7 @@ export class FFmpegWasm implements INodeType {
           // Write input file to FFmpeg virtual filesystem
           const inputData = await this.helpers.getBinaryDataBuffer(
             i,
-            binaryPropertyName,
+            binaryPropertyName
           );
           await ffmpeg.writeFile(inputFilename, inputData);
 
@@ -382,7 +642,7 @@ export class FFmpegWasm implements INodeType {
             case "convert": {
               const outputFormat = this.getNodeParameter(
                 "outputFormat",
-                i,
+                i
               ) as string;
               outputExt = outputFormat.startsWith(".")
                 ? outputFormat
@@ -394,11 +654,11 @@ export class FFmpegWasm implements INodeType {
             case "extractAudio": {
               const audioFormat = this.getNodeParameter(
                 "audioFormat",
-                i,
+                i
               ) as string;
               const audioQuality = this.getNodeParameter(
                 "audioQuality",
-                i,
+                i
               ) as string;
               outputExt = `.${audioFormat}`;
               const outputName = `${outputFilename}${outputExt}`;
@@ -422,7 +682,7 @@ export class FFmpegWasm implements INodeType {
               const height = this.getNodeParameter("height", i) as number;
               const keepAspectRatio = this.getNodeParameter(
                 "keepAspectRatio",
-                i,
+                i
               ) as boolean;
               outputExt = ".mp4";
               const outputName = `${outputFilename}${outputExt}`;
@@ -443,11 +703,11 @@ export class FFmpegWasm implements INodeType {
               const timestamp = this.getNodeParameter("timestamp", i) as string;
               const thumbnailWidth = this.getNodeParameter(
                 "thumbnailWidth",
-                i,
+                i
               ) as number;
               const thumbnailHeight = this.getNodeParameter(
                 "thumbnailHeight",
-                i,
+                i
               ) as number;
               outputExt = ".jpg";
               const outputName = `${outputFilename}${outputExt}`;
@@ -470,11 +730,11 @@ export class FFmpegWasm implements INodeType {
             case "custom": {
               const ffmpegArgs = this.getNodeParameter(
                 "ffmpegArgs",
-                i,
+                i
               ) as string;
               const outputExtension = this.getNodeParameter(
                 "outputExtension",
-                i,
+                i
               ) as string;
               outputExt = outputExtension.startsWith(".")
                 ? outputExtension
@@ -494,15 +754,15 @@ export class FFmpegWasm implements INodeType {
             case "merge": {
               const videoBinaryProperties = this.getNodeParameter(
                 "videoBinaryProperties",
-                i,
+                i
               ) as string;
               const mergeOutputFormat = this.getNodeParameter(
                 "mergeOutputFormat",
-                i,
+                i
               ) as string;
               const addTransition = this.getNodeParameter(
                 "addTransition",
-                i,
+                i
               ) as boolean;
 
               const binaryProps = videoBinaryProperties
@@ -512,7 +772,7 @@ export class FFmpegWasm implements INodeType {
 
               if (binaryProps.length < 2) {
                 throw new Error(
-                  "At least 2 video binary properties are required for merging",
+                  "At least 2 video binary properties are required for merging"
                 );
               }
 
@@ -522,7 +782,7 @@ export class FFmpegWasm implements INodeType {
                 const propName = binaryProps[j];
                 const videoData = await this.helpers.getBinaryDataBuffer(
                   i,
-                  propName,
+                  propName
                 );
                 const inputName = `input_${i}_${j}_${Date.now()}.mp4`;
                 await ffmpeg.writeFile(inputName, videoData);
@@ -530,11 +790,13 @@ export class FFmpegWasm implements INodeType {
               }
 
               // Create concat list file
-              const concatList = inputFiles.map((f) => `file '${f}'`).join("\n");
+              const concatList = inputFiles
+                .map((f) => `file '${f}'`)
+                .join("\n");
               const listFilename = `list_${i}_${Date.now()}.txt`;
               await ffmpeg.writeFile(
                 listFilename,
-                new TextEncoder().encode(concatList),
+                new TextEncoder().encode(concatList)
               );
 
               outputExt = mergeOutputFormat.startsWith(".")
@@ -570,6 +832,200 @@ export class FFmpegWasm implements INodeType {
                   "0",
                   "-i",
                   listFilename,
+                  "-c",
+                  "copy",
+                  "-y",
+                  outputName,
+                ];
+              }
+              break;
+            }
+            case "trim": {
+              const startTime = this.getNodeParameter("startTime", i) as string;
+              const endTime = this.getNodeParameter("endTime", i) as string;
+              const duration = this.getNodeParameter("duration", i) as string;
+              outputExt = ".mp4";
+              const outputName = `${outputFilename}${outputExt}`;
+              ffmpegCommand = ["-i", inputFilename, "-ss", startTime];
+              if (duration) {
+                ffmpegCommand.push("-t", duration);
+              } else if (endTime) {
+                ffmpegCommand.push("-to", endTime);
+              }
+              ffmpegCommand.push("-c", "copy", "-y", outputName);
+              break;
+            }
+            case "videoFilters": {
+              const brightness = this.getNodeParameter(
+                "brightness",
+                i
+              ) as number;
+              const contrast = this.getNodeParameter("contrast", i) as number;
+              const saturation = this.getNodeParameter(
+                "saturation",
+                i
+              ) as number;
+              const blur = this.getNodeParameter("blur", i) as number;
+              const grayscale = this.getNodeParameter(
+                "grayscale",
+                i
+              ) as boolean;
+              const sepia = this.getNodeParameter("sepia", i) as boolean;
+              const filtersOutputFormat = this.getNodeParameter(
+                "filtersOutputFormat",
+                i
+              ) as string;
+              const vfFilters: string[] = [];
+              if (brightness !== 0) {
+                vfFilters.push(`eq=brightness=${brightness}`);
+              }
+              if (contrast !== 1) {
+                vfFilters.push(`eq=contrast=${contrast}`);
+              }
+              if (saturation !== 1) {
+                vfFilters.push(`eq=saturation=${saturation}`);
+              }
+              if (blur > 0) {
+                vfFilters.push(`gblur=sigma=${blur}`);
+              }
+              if (grayscale) {
+                vfFilters.push("format=gray");
+              }
+              if (sepia) {
+                vfFilters.push(
+                  "colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131"
+                );
+              }
+              outputExt = filtersOutputFormat.startsWith(".")
+                ? filtersOutputFormat
+                : `.${filtersOutputFormat}`;
+              const outputName = `${outputFilename}${outputExt}`;
+              if (vfFilters.length > 0) {
+                ffmpegCommand = [
+                  "-i",
+                  inputFilename,
+                  "-vf",
+                  vfFilters.join(","),
+                  "-c:a",
+                  "copy",
+                  "-y",
+                  outputName,
+                ];
+              } else {
+                ffmpegCommand = [
+                  "-i",
+                  inputFilename,
+                  "-c",
+                  "copy",
+                  "-y",
+                  outputName,
+                ];
+              }
+              break;
+            }
+            case "speed": {
+              const speedValue = this.getNodeParameter(
+                "speedValue",
+                i
+              ) as string;
+              const adjustAudioPitch = this.getNodeParameter(
+                "adjustAudioPitch",
+                i
+              ) as boolean;
+              const speedOutputFormat = this.getNodeParameter(
+                "speedOutputFormat",
+                i
+              ) as string;
+              const speed = parseFloat(speedValue);
+              outputExt = speedOutputFormat.startsWith(".")
+                ? speedOutputFormat
+                : `.${speedOutputFormat}`;
+              const outputName = `${outputFilename}${outputExt}`;
+              const videoFilter = `setpts=${1 / speed}*PTS`;
+              if (adjustAudioPitch) {
+                const audioFilter = `atempo=${
+                  speed > 2 ? 2 : speed < 0.5 ? 0.5 : speed
+                }`;
+                ffmpegCommand = [
+                  "-i",
+                  inputFilename,
+                  "-vf",
+                  videoFilter,
+                  "-af",
+                  audioFilter,
+                  "-y",
+                  outputName,
+                ];
+              } else {
+                ffmpegCommand = [
+                  "-i",
+                  inputFilename,
+                  "-vf",
+                  videoFilter,
+                  "-an",
+                  "-y",
+                  outputName,
+                ];
+              }
+              break;
+            }
+            case "rotate": {
+              const rotation = this.getNodeParameter("rotation", i) as string;
+              const flipHorizontal = this.getNodeParameter(
+                "flipHorizontal",
+                i
+              ) as boolean;
+              const flipVertical = this.getNodeParameter(
+                "flipVertical",
+                i
+              ) as boolean;
+              const rotateOutputFormat = this.getNodeParameter(
+                "rotateOutputFormat",
+                i
+              ) as string;
+              const transposeValues: string[] = [];
+              switch (rotation) {
+                case "90":
+                  transposeValues.push("1");
+                  break;
+                case "270":
+                  transposeValues.push("2");
+                  break;
+                case "180":
+                  transposeValues.push("1,1");
+                  break;
+                case "0":
+                default:
+                  break;
+              }
+              if (flipHorizontal) {
+                transposeValues.push("3");
+              }
+              if (flipVertical) {
+                transposeValues.push("0");
+              }
+              outputExt = rotateOutputFormat.startsWith(".")
+                ? rotateOutputFormat
+                : `.${rotateOutputFormat}`;
+              const outputName = `${outputFilename}${outputExt}`;
+              if (transposeValues.length > 0) {
+                const transposeFilter = transposeValues
+                  .map((v) => `transpose=${v}`)
+                  .join(",");
+                ffmpegCommand = [
+                  "-i",
+                  inputFilename,
+                  "-vf",
+                  transposeFilter,
+                  "-c:a",
+                  "copy",
+                  "-y",
+                  outputName,
+                ];
+              } else {
+                ffmpegCommand = [
+                  "-i",
+                  inputFilename,
                   "-c",
                   "copy",
                   "-y",
