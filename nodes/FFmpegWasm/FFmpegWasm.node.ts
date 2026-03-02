@@ -4,9 +4,7 @@ import type {
   INodeType,
   INodeTypeDescription,
 } from "n8n-workflow";
-import { NodeConnectionType } from "n8n-workflow";
 import { FFmpeg } from "@ffmpeg/ffmpeg";
-import { fetchFile } from "@ffmpeg/util";
 
 type OperationType =
   | "convert"
@@ -27,8 +25,8 @@ export class FFmpegWasm implements INodeType {
     defaults: {
       name: "FFmpeg.wasm",
     },
-    inputs: [NodeConnectionType.Main],
-    outputs: [NodeConnectionType.Main],
+    inputs: ["main"],
+    outputs: ["main"],
     credentials: [
       {
         name: "ffmpegWasmApi",
