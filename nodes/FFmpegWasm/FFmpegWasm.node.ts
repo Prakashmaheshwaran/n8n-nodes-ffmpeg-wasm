@@ -16,7 +16,10 @@ type OperationType =
   | "trim"
   | "videoFilters"
   | "speed"
-  | "rotate";
+  | "rotate"
+  | "audioMix"
+  | "audioFilters"
+  | "audioNormalize";
 
 export class FFmpegWasm implements INodeType {
   description: INodeTypeDescription = {
@@ -104,6 +107,24 @@ export class FFmpegWasm implements INodeType {
             value: "rotate",
             description: "Rotate or flip video orientation",
             action: "Rotate video",
+          },
+          {
+            name: "Audio Mix",
+            value: "audioMix",
+            description: "Mix multiple audio tracks into one",
+            action: "Mix audio tracks",
+          },
+          {
+            name: "Audio Filters",
+            value: "audioFilters",
+            description: "Apply audio filters like volume, bass, treble",
+            action: "Apply audio filters",
+          },
+          {
+            name: "Audio Normalize",
+            value: "audioNormalize",
+            description: "Normalize audio levels to target loudness",
+            action: "Normalize audio",
           },
         ],
         default: "convert",
@@ -553,6 +574,143 @@ export class FFmpegWasm implements INodeType {
         },
         default: "mp4",
         description: "Output file format",
+      },
+      // Audio Mix options
+      {
+        displayName: "Audio Binary Properties",
+        name: "audioBinaryProperties",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["audioMix"],
+          },
+        },
+        default: "audio1,audio2",
+        placeholder: "audio1,audio2,audio3",
+        description: "Comma-separated list of binary property names to mix",
+        required: true,
+      },
+      {
+        displayName: "Output Format",
+        name: "audioMixOutputFormat",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["audioMix"],
+          },
+        },
+        default: "mp3",
+        description: "Output audio format",
+      },
+      // Audio Filters options
+      {
+        displayName: "Volume",
+        name: "volume",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["audioFilters"],
+          },
+        },
+        default: 1.0,
+        description: "Volume multiplier (0.5 = half volume, 2.0 = double)",
+      },
+      {
+        displayName: "Bass Boost",
+        name: "bassBoost",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["audioFilters"],
+          },
+        },
+        default: 0,
+        description: "Bass boost in dB (0-20)",
+      },
+      {
+        displayName: "Treble Boost",
+        name: "trebleBoost",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["audioFilters"],
+          },
+        },
+        default: 0,
+        description: "Treble boost in dB (0-20)",
+      },
+      {
+        displayName: "High Pass Filter",
+        name: "highPass",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["audioFilters"],
+          },
+        },
+        default: 0,
+        description: "High pass filter frequency in Hz (0 to disable)",
+      },
+      {
+        displayName: "Low Pass Filter",
+        name: "lowPass",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["audioFilters"],
+          },
+        },
+        default: 0,
+        description: "Low pass filter frequency in Hz (0 to disable)",
+      },
+      {
+        displayName: "Output Format",
+        name: "audioFiltersOutputFormat",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["audioFilters"],
+          },
+        },
+        default: "mp3",
+        description: "Output audio format",
+      },
+      // Audio Normalize options
+      {
+        displayName: "Target Loudness",
+        name: "targetLoudness",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["audioNormalize"],
+          },
+        },
+        default: -14,
+        description: "Target loudness in LUFS (-70 to -5, -14 is standard)",
+      },
+      {
+        displayName: "True Peak Limit",
+        name: "truePeak",
+        type: "number",
+        displayOptions: {
+          show: {
+            operation: ["audioNormalize"],
+          },
+        },
+        default: -1,
+        description: "True peak limit in dBTP (-9 to 0, -1 is standard)",
+      },
+      {
+        displayName: "Output Format",
+        name: "audioNormalizeOutputFormat",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["audioNormalize"],
+          },
+        },
+        default: "mp3",
+        description: "Output audio format",
       },
       // Additional options
       {
@@ -1032,6 +1190,153 @@ export class FFmpegWasm implements INodeType {
                   outputName,
                 ];
               }
+              break;
+            }
+            case "audioMix": {
+              const audioBinaryProperties = this.getNodeParameter(
+                "audioBinaryProperties",
+                i
+              ) as string;
+              const audioMixOutputFormat = this.getNodeParameter(
+                "audioMixOutputFormat",
+                i
+              ) as string;
+
+              const binaryProps = audioBinaryProperties
+                .split(",")
+                .map((p) => p.trim())
+                .filter((p) => p.length > 0);
+
+              if (binaryProps.length < 2) {
+                throw new Error(
+                  "At least 2 audio binary properties are required for mixing"
+                );
+              }
+
+              // Write all input files
+              const inputFiles: string[] = [];
+              for (let j = 0; j < binaryProps.length; j++) {
+                const propName = binaryProps[j];
+                const audioData = await this.helpers.getBinaryDataBuffer(
+                  i,
+                  propName
+                );
+                const inputName = `audio_input_${i}_${j}_${Date.now()}.wav`;
+                await ffmpeg.writeFile(inputName, audioData);
+                inputFiles.push(inputName);
+              }
+
+              outputExt = audioMixOutputFormat.startsWith(".")
+                ? audioMixOutputFormat
+                : `.${audioMixOutputFormat}`;
+              const outputName = `${outputFilename}${outputExt}`;
+
+              // Build amix filter with all inputs
+              const filterComplex =
+                inputFiles.map((_f, idx) => `[${idx}:a]`).join("") +
+                `amix=inputs=${inputFiles.length}:duration=longest[aout]`;
+
+              const inputs: string[] = [];
+              for (const _f of inputFiles) {
+                inputs.push("-i", _f);
+              }
+
+              ffmpegCommand = [
+                ...inputs,
+                "-filter_complex",
+                filterComplex,
+                "-map",
+                "[aout]",
+                "-y",
+                outputName,
+              ];
+              break;
+            }
+            case "audioFilters": {
+              const volume = this.getNodeParameter("volume", i) as number;
+              const bassBoost = this.getNodeParameter("bassBoost", i) as number;
+              const trebleBoost = this.getNodeParameter(
+                "trebleBoost",
+                i
+              ) as number;
+              const highPass = this.getNodeParameter("highPass", i) as number;
+              const lowPass = this.getNodeParameter("lowPass", i) as number;
+              const audioFiltersOutputFormat = this.getNodeParameter(
+                "audioFiltersOutputFormat",
+                i
+              ) as string;
+
+              const afFilters: string[] = [];
+
+              if (volume !== 1.0) {
+                afFilters.push(`volume=${volume}`);
+              }
+              if (bassBoost > 0) {
+                afFilters.push(`bass=g=${bassBoost}`);
+              }
+              if (trebleBoost > 0) {
+                afFilters.push(`treble=g=${trebleBoost}`);
+              }
+              if (highPass > 0) {
+                afFilters.push(`highpass=f=${highPass}`);
+              }
+              if (lowPass > 0) {
+                afFilters.push(`lowpass=f=${lowPass}`);
+              }
+
+              outputExt = audioFiltersOutputFormat.startsWith(".")
+                ? audioFiltersOutputFormat
+                : `.${audioFiltersOutputFormat}`;
+              const outputName = `${outputFilename}${outputExt}`;
+
+              if (afFilters.length > 0) {
+                ffmpegCommand = [
+                  "-i",
+                  inputFilename,
+                  "-af",
+                  afFilters.join(","),
+                  "-y",
+                  outputName,
+                ];
+              } else {
+                ffmpegCommand = [
+                  "-i",
+                  inputFilename,
+                  "-c:a",
+                  "copy",
+                  "-y",
+                  outputName,
+                ];
+              }
+              break;
+            }
+            case "audioNormalize": {
+              const targetLoudness = this.getNodeParameter(
+                "targetLoudness",
+                i
+              ) as number;
+              const truePeak = this.getNodeParameter("truePeak", i) as number;
+              const audioNormalizeOutputFormat = this.getNodeParameter(
+                "audioNormalizeOutputFormat",
+                i
+              ) as string;
+
+              outputExt = audioNormalizeOutputFormat.startsWith(".")
+                ? audioNormalizeOutputFormat
+                : `.${audioNormalizeOutputFormat}`;
+              const outputName = `${outputFilename}${outputExt}`;
+
+              // Use loudnorm filter for audio normalization
+              const loudnormFilter = `loudnorm=I=${targetLoudness}:TP=${truePeak}:LRA=11`;
+
+              ffmpegCommand = [
+                "-i",
+                inputFilename,
+                "-af",
+                loudnormFilter,
+                "-y",
+                outputName,
+              ];
               break;
             }
             default:
