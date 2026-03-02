@@ -11,7 +11,8 @@ type OperationType =
   | "extractAudio"
   | "resize"
   | "thumbnail"
-  | "custom";
+  | "custom"
+  | "merge";
 
 export class FFmpegWasm implements INodeType {
   description: INodeTypeDescription = {
@@ -69,6 +70,12 @@ export class FFmpegWasm implements INodeType {
             value: "custom",
             description: "Run custom FFmpeg command",
             action: "Execute custom FFmpeg command",
+          },
+          {
+            name: "Merge Videos",
+            value: "merge",
+            description: "Merge multiple videos into one",
+            action: "Merge videos",
           },
         ],
         default: "convert",
@@ -246,6 +253,46 @@ export class FFmpegWasm implements INodeType {
         default: "mp4",
         description: "Output file extension",
         required: true,
+      },
+      // Merge videos options
+      {
+        displayName: "Video Binary Properties",
+        name: "videoBinaryProperties",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["merge"],
+          },
+        },
+        default: "data",
+        placeholder: "data,video1,video2",
+        description: "Comma-separated list of binary property names to merge",
+        required: true,
+      },
+      {
+        displayName: "Output Format",
+        name: "mergeOutputFormat",
+        type: "string",
+        displayOptions: {
+          show: {
+            operation: ["merge"],
+          },
+        },
+        default: "mp4",
+        description: "Output format for merged video",
+        required: true,
+      },
+      {
+        displayName: "Add Transition",
+        name: "addTransition",
+        type: "boolean",
+        displayOptions: {
+          show: {
+            operation: ["merge"],
+          },
+        },
+        default: false,
+        description: "Whether to add a fade transition between videos",
       },
       // Additional options
       {
@@ -442,6 +489,93 @@ export class FFmpegWasm implements INodeType {
               ffmpegCommand = argsString
                 .split(/\s+/)
                 .filter((arg) => arg.length > 0);
+              break;
+            }
+            case "merge": {
+              const videoBinaryProperties = this.getNodeParameter(
+                "videoBinaryProperties",
+                i,
+              ) as string;
+              const mergeOutputFormat = this.getNodeParameter(
+                "mergeOutputFormat",
+                i,
+              ) as string;
+              const addTransition = this.getNodeParameter(
+                "addTransition",
+                i,
+              ) as boolean;
+
+              const binaryProps = videoBinaryProperties
+                .split(",")
+                .map((p) => p.trim())
+                .filter((p) => p.length > 0);
+
+              if (binaryProps.length < 2) {
+                throw new Error(
+                  "At least 2 video binary properties are required for merging",
+                );
+              }
+
+              // Write all input files
+              const inputFiles: string[] = [];
+              for (let j = 0; j < binaryProps.length; j++) {
+                const propName = binaryProps[j];
+                const videoData = await this.helpers.getBinaryDataBuffer(
+                  i,
+                  propName,
+                );
+                const inputName = `input_${i}_${j}_${Date.now()}.mp4`;
+                await ffmpeg.writeFile(inputName, videoData);
+                inputFiles.push(inputName);
+              }
+
+              // Create concat list file
+              const concatList = inputFiles.map((f) => `file '${f}'`).join("\n");
+              const listFilename = `list_${i}_${Date.now()}.txt`;
+              await ffmpeg.writeFile(
+                listFilename,
+                new TextEncoder().encode(concatList),
+              );
+
+              outputExt = mergeOutputFormat.startsWith(".")
+                ? mergeOutputFormat
+                : `.${mergeOutputFormat}`;
+              const outputName = `${outputFilename}${outputExt}`;
+
+              // Build concat command
+              if (addTransition) {
+                // With fade transition (more complex)
+                ffmpegCommand = [
+                  "-f",
+                  "concat",
+                  "-safe",
+                  "0",
+                  "-i",
+                  listFilename,
+                  "-vf",
+                  "fade=st=0:d=0.5:alpha=1,format=yuv420p",
+                  "-c:v",
+                  "libx264",
+                  "-preset",
+                  "fast",
+                  "-y",
+                  outputName,
+                ];
+              } else {
+                // Simple concat (same codec, fast)
+                ffmpegCommand = [
+                  "-f",
+                  "concat",
+                  "-safe",
+                  "0",
+                  "-i",
+                  listFilename,
+                  "-c",
+                  "copy",
+                  "-y",
+                  outputName,
+                ];
+              }
               break;
             }
             default:
