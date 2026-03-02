@@ -1,0 +1,15 @@
+dist/
+node_modules/
+*.log
+.DS_Store
+.env
+.vscode/
+.idea/
+coverage/
+*.tsbuildinfo
+.nyc_output/
+.cache/
+temp/
+tmp/
+*.tgz
+*.tar.gz
