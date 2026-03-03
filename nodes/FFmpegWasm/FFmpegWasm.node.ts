@@ -4,7 +4,7 @@ import type {
   INodeType,
   INodeTypeDescription,
 } from "n8n-workflow";
-import { FFmpeg } from "@ffmpeg/ffmpeg";
+import { createFFmpeg } from "@ffmpeg/ffmpeg";
 import {
   getInputExtension,
   getMimeTypeFromExtension,
@@ -1057,40 +1057,34 @@ export class FFmpegWasm implements INodeType {
     const items = this.getInputData();
     const returnData: INodeExecutionData[] = [];
 
-    const ffmpeg = new FFmpeg();
+    let corePath: string | undefined;
+    try {
+      const credentials =
+        await this.getCredentials("ffmpegWasmApi");
+      if (credentials.corePath) {
+        corePath = credentials.corePath as string;
+      }
+    } catch {
+      // Credentials not configured, use defaults
+    }
+
+    let lastLogOutput = "";
+    const firstOpts = this.getNodeParameter(
+      "additionalOptions",
+      0,
+      {},
+    ) as { enableLogging?: boolean };
+
+    const ffmpeg = createFFmpeg({
+      log: firstOpts.enableLogging || false,
+      logger: ({ message }: { message: string }) => {
+        lastLogOutput += message + "\n";
+      },
+      ...(corePath ? { corePath } : {}),
+    });
 
     try {
-      // B9: Load credentials for custom FFmpeg WASM URLs
-      const loadOptions: Record<string, string> = {};
-      try {
-        const credentials =
-          await this.getCredentials("ffmpegWasmApi");
-        if (credentials.coreURL)
-          loadOptions.coreURL = credentials.coreURL as string;
-        if (credentials.wasmURL)
-          loadOptions.wasmURL = credentials.wasmURL as string;
-        if (credentials.workerURL)
-          loadOptions.workerURL = credentials.workerURL as string;
-      } catch {
-        // Credentials not configured, use defaults
-      }
-      await ffmpeg.load(
-        Object.keys(loadOptions).length > 0 ? loadOptions : undefined,
-      );
-
-      // I6: Set up log capture once (outside item loop)
-      let lastLogOutput = "";
-      const firstOpts = this.getNodeParameter(
-        "additionalOptions",
-        0,
-        {},
-      ) as { enableLogging?: boolean };
-      ffmpeg.on("log", ({ message }: { message: string }) => {
-        lastLogOutput += message + "\n";
-        if (firstOpts.enableLogging) {
-          console.log(`FFmpeg: ${message}`);
-        }
-      });
+      await ffmpeg.load();
 
       for (let i = 0; i < items.length; i++) {
         try {
@@ -1115,7 +1109,6 @@ export class FFmpegWasm implements INodeType {
             );
           }
 
-          // B7: Derive input extension from binary metadata
           const inputExt = getInputExtension(binaryData);
           const inputFilename = `input_${i}_${Date.now()}${inputExt}`;
           const outputFilename = `output_${i}_${Date.now()}`;
@@ -1124,15 +1117,19 @@ export class FFmpegWasm implements INodeType {
             i,
             binaryPropertyName,
           );
-          await ffmpeg.writeFile(inputFilename, inputData);
+          ffmpeg.FS("writeFile", inputFilename, new Uint8Array(inputData));
 
           let ffmpegCommand: string[] = [];
           let outputExt = "";
 
-          // ---------- metadata (F1) ----------
+          // ---------- metadata ----------
           if (operation === "metadata") {
             lastLogOutput = "";
-            await ffmpeg.exec(["-i", inputFilename, "-hide_banner"]);
+            try {
+              await ffmpeg.run("-i", inputFilename, "-hide_banner");
+            } catch {
+              // Expected: ffmpeg exits with error when no output is specified
+            }
             const metadata = parseMetadataFromLogs(lastLogOutput);
 
             returnData.push({
@@ -1143,7 +1140,7 @@ export class FFmpegWasm implements INodeType {
             });
 
             try {
-              await ffmpeg.deleteFile(inputFilename);
+              ffmpeg.FS("unlink", inputFilename);
             } catch {}
             continue;
           }
@@ -1321,14 +1318,13 @@ export class FFmpegWasm implements INodeType {
               for (let j = 0; j < binaryProps.length; j++) {
                 const propName = binaryProps[j];
                 const propBinary = items[i].binary?.[propName];
-                // B11: Derive extension from binary data
                 const ext = propBinary
                   ? getInputExtension(propBinary)
                   : ".mp4";
                 const videoData =
                   await this.helpers.getBinaryDataBuffer(i, propName);
                 const inputName = `input_${i}_${j}_${Date.now()}${ext}`;
-                await ffmpeg.writeFile(inputName, videoData);
+                ffmpeg.FS("writeFile", inputName, new Uint8Array(videoData));
                 inputFiles.push(inputName);
               }
 
@@ -1336,7 +1332,8 @@ export class FFmpegWasm implements INodeType {
                 .map((f) => `file '${f}'`)
                 .join("\n");
               const listFilename = `list_${i}_${Date.now()}.txt`;
-              await ffmpeg.writeFile(
+              ffmpeg.FS(
+                "writeFile",
                 listFilename,
                 new TextEncoder().encode(concatList),
               );
@@ -1432,7 +1429,6 @@ export class FFmpegWasm implements INodeType {
 
               const vfFilters: string[] = [];
 
-              // B3: Combine eq parameters into a single filter
               const eqParts: string[] = [];
               if (brightness !== 0)
                 eqParts.push(`brightness=${brightness}`);
@@ -1502,7 +1498,6 @@ export class FFmpegWasm implements INodeType {
               const videoFilter = `setpts=${1 / speed}*PTS`;
 
               if (adjustAudioPitch) {
-                // B4: Build chained atempo for extreme speeds
                 const audioFilter = buildAtempoFilter(speed);
                 ffmpegCommand = [
                   "-i",
@@ -1555,7 +1550,6 @@ export class FFmpegWasm implements INodeType {
                   vfParts.push("transpose=2");
                   break;
                 case "180":
-                  // B2: Two separate transpose=1 calls for 180 degrees
                   vfParts.push("transpose=1");
                   vfParts.push("transpose=1");
                   break;
@@ -1622,14 +1616,13 @@ export class FFmpegWasm implements INodeType {
               for (let j = 0; j < binaryProps.length; j++) {
                 const propName = binaryProps[j];
                 const propBinary = items[i].binary?.[propName];
-                // B12: Derive extension from binary data
                 const ext = propBinary
                   ? getInputExtension(propBinary)
                   : ".wav";
                 const audioData =
                   await this.helpers.getBinaryDataBuffer(i, propName);
                 const inputName = `audio_input_${i}_${j}_${Date.now()}${ext}`;
-                await ffmpeg.writeFile(inputName, audioData);
+                ffmpeg.FS("writeFile", inputName, new Uint8Array(audioData));
                 inputFiles.push(inputName);
               }
 
@@ -1785,7 +1778,6 @@ export class FFmpegWasm implements INodeType {
 
               const overlayBin =
                 items[i].binary?.[overlayBinaryProperty];
-              // B8: Include extension for format detection
               const overlayExt = overlayBin
                 ? getInputExtension(overlayBin)
                 : ".png";
@@ -1795,12 +1787,11 @@ export class FFmpegWasm implements INodeType {
                   overlayBinaryProperty,
                 );
               const overlayFilename = `overlay_${i}_${Date.now()}${overlayExt}`;
-              await ffmpeg.writeFile(overlayFilename, overlayData);
+              ffmpeg.FS("writeFile", overlayFilename, new Uint8Array(overlayData));
 
               outputExt = normalizeExtension(overlayOutputFormat);
               const outputName = `${outputFilename}${outputExt}`;
 
-              // Build the video overlay filter with named output
               let videoFilter = "";
               if (overlayWidth > 0 || overlayHeight > 0) {
                 const wStr =
@@ -1824,7 +1815,6 @@ export class FFmpegWasm implements INodeType {
                 }
               }
 
-              // B14: Differentiate PiP (mix both audio tracks) vs watermark (main audio only)
               if (overlayType === "pip") {
                 const fullFilter = `${videoFilter};[0:a][1:a]amix=inputs=2:duration=first[outa]`;
                 ffmpegCommand = [
@@ -1898,12 +1888,11 @@ export class FFmpegWasm implements INodeType {
                   subtitleBinaryProperty,
                 );
               const subtitleFilename = `subtitle_${i}_${Date.now()}.${subtitleFormat}`;
-              await ffmpeg.writeFile(subtitleFilename, subtitleData);
+              ffmpeg.FS("writeFile", subtitleFilename, new Uint8Array(subtitleData));
 
               outputExt = normalizeExtension(subtitleOutputFormat);
               const outputName = `${outputFilename}${outputExt}`;
 
-              // B5: Convert color to proper ASS &HBBGGRR& format
               const assColor = colorToAssFormat(subtitleFontColor);
 
               let alignment = "2";
@@ -1986,7 +1975,6 @@ export class FFmpegWasm implements INodeType {
 
               if (gifOutputFormat === "gif") {
                 const loopValue = gifLoop ? "0" : "-1";
-                // B6: Use -filter_complex for palettegen/paletteuse pipeline
                 const gifFilter = `[0:v]${scaleFilter},split[s0][s1];[s0]palettegen=max_colors=${gifColors}[p];[s1][p]paletteuse=dither=${gifDither}`;
                 ffmpegCommand = [
                   "-ss",
@@ -2087,12 +2075,11 @@ export class FFmpegWasm implements INodeType {
               cmdArgs.push("-y", outputPattern);
               ffmpegCommand = cmdArgs;
 
-              // B15: Execute with timeout
               const seqTimeoutMs =
                 (additionalOptions.timeout || 300) * 1000;
               lastLogOutput = "";
               await Promise.race([
-                ffmpeg.exec(ffmpegCommand),
+                ffmpeg.run(...ffmpegCommand),
                 new Promise<never>((_, reject) =>
                   setTimeout(
                     () =>
@@ -2106,16 +2093,13 @@ export class FFmpegWasm implements INodeType {
                 ),
               ]);
 
-              // B1: Read all generated frame files
               const mimeType =
                 getMimeTypeFromExtension(sequenceOutputFormat);
               let frameIndex = 1;
               while (true) {
                 const frameName = `frame_${String(frameIndex).padStart(4, "0")}.${sequenceOutputFormat}`;
                 try {
-                  const frameData = (await ffmpeg.readFile(
-                    frameName,
-                  )) as Uint8Array;
+                  const frameData = ffmpeg.FS("readFile", frameName) as Uint8Array;
                   returnData.push({
                     json: {
                       ...items[i].json,
@@ -2138,7 +2122,9 @@ export class FFmpegWasm implements INodeType {
                       },
                     },
                   });
-                  await ffmpeg.deleteFile(frameName);
+                  try {
+                    ffmpeg.FS("unlink", frameName);
+                  } catch {}
                   frameIndex++;
                 } catch {
                   break;
@@ -2146,7 +2132,7 @@ export class FFmpegWasm implements INodeType {
               }
 
               try {
-                await ffmpeg.deleteFile(inputFilename);
+                ffmpeg.FS("unlink", inputFilename);
               } catch {}
               continue;
             }
@@ -2229,13 +2215,16 @@ export class FFmpegWasm implements INodeType {
               outputExt = normalizeExtension(compressOutputFormat);
               const outputName = `${outputFilename}${outputExt}`;
 
-              // Get duration from metadata to calculate target bitrate
               lastLogOutput = "";
-              await ffmpeg.exec([
-                "-i",
-                inputFilename,
-                "-hide_banner",
-              ]);
+              try {
+                await ffmpeg.run(
+                  "-i",
+                  inputFilename,
+                  "-hide_banner",
+                );
+              } catch {
+                // Expected: ffmpeg exits with error when no output is specified
+              }
               const meta = parseMetadataFromLogs(lastLogOutput);
               const durationSec = meta.durationSeconds || 60;
 
@@ -2275,12 +2264,11 @@ export class FFmpegWasm implements INodeType {
               throw new Error(`Unknown operation: ${operation}`);
           }
 
-          // B15: Execute with timeout
           const timeoutMs =
             (additionalOptions.timeout || 300) * 1000;
           lastLogOutput = "";
           await Promise.race([
-            ffmpeg.exec(ffmpegCommand),
+            ffmpeg.run(...ffmpegCommand),
             new Promise<never>((_, reject) =>
               setTimeout(
                 () =>
@@ -2294,13 +2282,9 @@ export class FFmpegWasm implements INodeType {
             ),
           ]);
 
-          // Read output
           const outputName = `${outputFilename}${outputExt}`;
-          const outputData = (await ffmpeg.readFile(
-            outputName,
-          )) as Uint8Array;
+          const outputData = ffmpeg.FS("readFile", outputName) as Uint8Array;
 
-          // B13: Compute correct MIME type from output extension
           const outputMimeType = getMimeTypeFromExtension(
             outputExt.replace(".", ""),
           );
@@ -2327,8 +2311,8 @@ export class FFmpegWasm implements INodeType {
           returnData.push(outputItem);
 
           try {
-            await ffmpeg.deleteFile(inputFilename);
-            await ffmpeg.deleteFile(outputName);
+            ffmpeg.FS("unlink", inputFilename);
+            ffmpeg.FS("unlink", outputName);
           } catch {}
         } catch (error) {
           if (this.continueOnFail()) {
@@ -2338,17 +2322,17 @@ export class FFmpegWasm implements INodeType {
                 error:
                   error instanceof Error
                     ? error.message
-                    : "Unknown error",
+                    : String(error),
               },
             });
           } else {
-            throw error;
+            if (error instanceof Error) throw error;
+            throw new Error(String(error));
           }
         }
       }
     } finally {
-      // B10: Properly terminate FFmpeg WASM instance
-      ffmpeg.terminate();
+      ffmpeg.exit();
     }
 
     return [returnData];
