@@ -5,6 +5,15 @@ import type {
   INodeTypeDescription,
 } from "n8n-workflow";
 import { FFmpeg } from "@ffmpeg/ffmpeg";
+import {
+  getInputExtension,
+  getMimeTypeFromExtension,
+  normalizeExtension,
+  colorToAssFormat,
+  buildAtempoFilter,
+  parseMetadataFromLogs,
+  SOCIAL_MEDIA_PRESETS,
+} from "./helpers";
 
 type OperationType =
   | "convert"
@@ -23,7 +32,11 @@ type OperationType =
   | "overlay"
   | "subtitle"
   | "gif"
-  | "imageSequence";
+  | "imageSequence"
+  | "metadata"
+  | "remux"
+  | "socialMedia"
+  | "compressToSize";
 
 export class FFmpegWasm implements INodeType {
   description: INodeTypeDescription = {
@@ -97,7 +110,8 @@ export class FFmpegWasm implements INodeType {
           {
             name: "Video Filters",
             value: "videoFilters",
-            description: "Apply video filters like brightness, contrast, blur",
+            description:
+              "Apply video filters like brightness, contrast, blur",
             action: "Apply video filters",
           },
           {
@@ -155,6 +169,34 @@ export class FFmpegWasm implements INodeType {
             description: "Export video frames as image sequence",
             action: "Export video to image sequence",
           },
+          {
+            name: "Media Info",
+            value: "metadata",
+            description:
+              "Extract metadata (duration, resolution, codec, bitrate)",
+            action: "Extract media metadata",
+          },
+          {
+            name: "Remux (Fast Convert)",
+            value: "remux",
+            description:
+              "Change container format without re-encoding (near-instant)",
+            action: "Remux container format",
+          },
+          {
+            name: "Social Media Preset",
+            value: "socialMedia",
+            description:
+              "Optimize video for a social media platform",
+            action: "Apply social media preset",
+          },
+          {
+            name: "Compress to Size",
+            value: "compressToSize",
+            description:
+              "Compress video to a target file size",
+            action: "Compress to target size",
+          },
         ],
         default: "convert",
       },
@@ -163,7 +205,8 @@ export class FFmpegWasm implements INodeType {
         name: "binaryPropertyName",
         type: "string",
         default: "data",
-        description: "Name of the binary property containing the input file",
+        description:
+          "Name of the binary property containing the input file",
         placeholder: "e.g. data",
       },
       {
@@ -171,34 +214,70 @@ export class FFmpegWasm implements INodeType {
         name: "outputBinaryPropertyName",
         type: "string",
         default: "data",
-        description: "Name of the binary property to store the output file",
+        displayOptions: {
+          hide: {
+            operation: ["metadata"],
+          },
+        },
+        description:
+          "Name of the binary property to store the output file",
         placeholder: "e.g. data",
       },
-      // Convert operation options
+      // ── Convert ──
       {
         displayName: "Output Format",
         name: "outputFormat",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["convert"],
-          },
-        },
+        displayOptions: { show: { operation: ["convert"] } },
         default: "",
         placeholder: "mp4, webm, mp3, wav...",
-        description: "Output file format extension (e.g., mp4, webm, mp3)",
+        description:
+          "Output file format extension (e.g., mp4, webm, mp3)",
         required: true,
       },
-      // Extract audio options
+      {
+        displayName: "Video Codec",
+        name: "videoCodec",
+        type: "options",
+        displayOptions: { show: { operation: ["convert"] } },
+        options: [
+          { name: "Auto (default)", value: "auto" },
+          { name: "H.264 (libx264)", value: "libx264" },
+          { name: "H.265 (libx265)", value: "libx265" },
+          { name: "VP9 (libvpx-vp9)", value: "libvpx-vp9" },
+        ],
+        default: "auto",
+        description: "Video codec to use for encoding",
+      },
+      {
+        displayName: "Audio Codec",
+        name: "audioCodec",
+        type: "options",
+        displayOptions: { show: { operation: ["convert"] } },
+        options: [
+          { name: "Auto (default)", value: "auto" },
+          { name: "AAC", value: "aac" },
+          { name: "MP3 (libmp3lame)", value: "libmp3lame" },
+          { name: "Opus (libopus)", value: "libopus" },
+        ],
+        default: "auto",
+        description: "Audio codec to use for encoding",
+      },
+      {
+        displayName: "Quality (CRF)",
+        name: "crf",
+        type: "number",
+        displayOptions: { show: { operation: ["convert"] } },
+        default: -1,
+        description:
+          "Constant Rate Factor (0-51, lower = better quality, -1 for auto). Typical: 18-28",
+      },
+      // ── Extract Audio ──
       {
         displayName: "Audio Format",
         name: "audioFormat",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["extractAudio"],
-          },
-        },
+        displayOptions: { show: { operation: ["extractAudio"] } },
         default: "mp3",
         description: "Audio format to extract (mp3, aac, wav, ogg)",
         required: true,
@@ -213,24 +292,16 @@ export class FFmpegWasm implements INodeType {
           { name: "Low (128kbps)", value: "128k" },
           { name: "Very Low (96kbps)", value: "96k" },
         ],
-        displayOptions: {
-          show: {
-            operation: ["extractAudio"],
-          },
-        },
+        displayOptions: { show: { operation: ["extractAudio"] } },
         default: "192k",
         description: "Audio quality for extracted audio",
       },
-      // Resize operation options
+      // ── Resize ──
       {
         displayName: "Width",
         name: "width",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["resize"],
-          },
-        },
+        displayOptions: { show: { operation: ["resize"] } },
         default: 1280,
         description: "Output video width in pixels",
         required: true,
@@ -239,11 +310,7 @@ export class FFmpegWasm implements INodeType {
         displayName: "Height",
         name: "height",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["resize"],
-          },
-        },
+        displayOptions: { show: { operation: ["resize"] } },
         default: 720,
         description: "Output video height in pixels",
         required: true,
@@ -252,39 +319,28 @@ export class FFmpegWasm implements INodeType {
         displayName: "Keep Aspect Ratio",
         name: "keepAspectRatio",
         type: "boolean",
-        displayOptions: {
-          show: {
-            operation: ["resize"],
-          },
-        },
+        displayOptions: { show: { operation: ["resize"] } },
         default: true,
         description:
           "Whether to maintain aspect ratio using -1 for auto-calculation",
       },
-      // Thumbnail operation options
+      // ── Thumbnail ──
       {
         displayName: "Timestamp",
         name: "timestamp",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["thumbnail"],
-          },
-        },
+        displayOptions: { show: { operation: ["thumbnail"] } },
         default: "00:00:01",
         placeholder: "00:00:05",
-        description: "Timestamp to extract thumbnail (HH:MM:SS or seconds)",
+        description:
+          "Timestamp to extract thumbnail (HH:MM:SS or seconds)",
         required: true,
       },
       {
         displayName: "Width",
         name: "thumbnailWidth",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["thumbnail"],
-          },
-        },
+        displayOptions: { show: { operation: ["thumbnail"] } },
         default: 640,
         description: "Thumbnail width in pixels",
       },
@@ -292,27 +348,17 @@ export class FFmpegWasm implements INodeType {
         displayName: "Height",
         name: "thumbnailHeight",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["thumbnail"],
-          },
-        },
+        displayOptions: { show: { operation: ["thumbnail"] } },
         default: 360,
         description: "Thumbnail height in pixels (-1 for auto)",
       },
-      // Custom command options
+      // ── Custom ──
       {
         displayName: "FFmpeg Arguments",
         name: "ffmpegArgs",
         type: "string",
-        typeOptions: {
-          rows: 4,
-        },
-        displayOptions: {
-          show: {
-            operation: ["custom"],
-          },
-        },
+        typeOptions: { rows: 4 },
+        displayOptions: { show: { operation: ["custom"] } },
         default: "",
         placeholder: "-i input.mp4 -vf scale=640:-1 output.mp4",
         description:
@@ -323,79 +369,58 @@ export class FFmpegWasm implements INodeType {
         displayName: "Output Extension",
         name: "outputExtension",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["custom"],
-          },
-        },
+        displayOptions: { show: { operation: ["custom"] } },
         default: "mp4",
         description: "Output file extension",
         required: true,
       },
-      // Merge videos options
+      // ── Merge ──
       {
         displayName: "Video Binary Properties",
         name: "videoBinaryProperties",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["merge"],
-          },
-        },
+        displayOptions: { show: { operation: ["merge"] } },
         default: "data",
         placeholder: "data,video1,video2",
-        description: "Comma-separated list of binary property names to merge",
+        description:
+          "Comma-separated list of binary property names to merge",
         required: true,
       },
       {
         displayName: "Output Format",
         name: "mergeOutputFormat",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["merge"],
-          },
-        },
+        displayOptions: { show: { operation: ["merge"] } },
         default: "mp4",
         description: "Output format for merged video",
         required: true,
       },
       {
-        displayName: "Add Transition",
+        displayName: "Add Fade Effect",
         name: "addTransition",
         type: "boolean",
-        displayOptions: {
-          show: {
-            operation: ["merge"],
-          },
-        },
+        displayOptions: { show: { operation: ["merge"] } },
         default: false,
-        description: "Whether to add a fade transition between videos",
+        description:
+          "Whether to apply a fade-in effect and pixel format normalization to the merged output",
       },
-      // Trim video options
+      // ── Trim ──
       {
         displayName: "Start Time",
         name: "startTime",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["trim"],
-          },
-        },
+        displayOptions: { show: { operation: ["trim"] } },
         default: "00:00:00",
         placeholder: "00:00:10 or 10",
-        description: "Start time for trimming (HH:MM:SS or seconds)",
+        description:
+          "Start time for trimming (HH:MM:SS or seconds)",
         required: true,
       },
       {
         displayName: "End Time",
         name: "endTime",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["trim"],
-          },
-        },
+        displayOptions: { show: { operation: ["trim"] } },
         default: "",
         placeholder: "00:01:00 or 60",
         description:
@@ -405,26 +430,18 @@ export class FFmpegWasm implements INodeType {
         displayName: "Duration",
         name: "duration",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["trim"],
-          },
-        },
+        displayOptions: { show: { operation: ["trim"] } },
         default: "",
         placeholder: "00:00:30 or 30",
         description:
           "Duration to trim (HH:MM:SS or seconds). Alternative to End Time",
       },
-      // Video filters options
+      // ── Video Filters ──
       {
         displayName: "Brightness",
         name: "brightness",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["videoFilters"],
-          },
-        },
+        displayOptions: { show: { operation: ["videoFilters"] } },
         default: 0,
         description: "Adjust brightness (-1.0 to 1.0, 0 is default)",
       },
@@ -432,35 +449,25 @@ export class FFmpegWasm implements INodeType {
         displayName: "Contrast",
         name: "contrast",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["videoFilters"],
-          },
-        },
+        displayOptions: { show: { operation: ["videoFilters"] } },
         default: 1,
-        description: "Adjust contrast (0.0 to 2.0, 1.0 is default)",
+        description:
+          "Adjust contrast (0.0 to 2.0, 1.0 is default)",
       },
       {
         displayName: "Saturation",
         name: "saturation",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["videoFilters"],
-          },
-        },
+        displayOptions: { show: { operation: ["videoFilters"] } },
         default: 1,
-        description: "Adjust saturation (0.0 to 3.0, 1.0 is default)",
+        description:
+          "Adjust saturation (0.0 to 3.0, 1.0 is default)",
       },
       {
         displayName: "Blur",
         name: "blur",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["videoFilters"],
-          },
-        },
+        displayOptions: { show: { operation: ["videoFilters"] } },
         default: 0,
         description: "Apply Gaussian blur (0 to 10, 0 is no blur)",
       },
@@ -468,11 +475,7 @@ export class FFmpegWasm implements INodeType {
         displayName: "Grayscale",
         name: "grayscale",
         type: "boolean",
-        displayOptions: {
-          show: {
-            operation: ["videoFilters"],
-          },
-        },
+        displayOptions: { show: { operation: ["videoFilters"] } },
         default: false,
         description: "Whether to convert video to grayscale",
       },
@@ -480,11 +483,7 @@ export class FFmpegWasm implements INodeType {
         displayName: "Sepia",
         name: "sepia",
         type: "boolean",
-        displayOptions: {
-          show: {
-            operation: ["videoFilters"],
-          },
-        },
+        displayOptions: { show: { operation: ["videoFilters"] } },
         default: false,
         description: "Whether to apply sepia effect",
       },
@@ -492,35 +491,26 @@ export class FFmpegWasm implements INodeType {
         displayName: "Output Format",
         name: "filtersOutputFormat",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["videoFilters"],
-          },
-        },
+        displayOptions: { show: { operation: ["videoFilters"] } },
         default: "mp4",
         description: "Output file format",
       },
-      // Speed adjustment options
+      // ── Speed ──
       {
         displayName: "Speed",
         name: "speedValue",
         type: "options",
-        displayOptions: {
-          show: {
-            operation: ["speed"],
-          },
-        },
+        displayOptions: { show: { operation: ["speed"] } },
         options: [
           { name: "0.25x (Very Slow)", value: "0.25" },
           { name: "0.5x (Slow)", value: "0.5" },
           { name: "0.75x (Slightly Slow)", value: "0.75" },
-          { name: "1x (Normal)", value: "1" },
           { name: "1.25x (Slightly Fast)", value: "1.25" },
           { name: "1.5x (Fast)", value: "1.5" },
           { name: "2x (Double Speed)", value: "2" },
           { name: "4x (Quadruple Speed)", value: "4" },
         ],
-        default: "1",
+        default: "2",
         description: "Playback speed multiplier",
         required: true,
       },
@@ -528,37 +518,25 @@ export class FFmpegWasm implements INodeType {
         displayName: "Adjust Audio Pitch",
         name: "adjustAudioPitch",
         type: "boolean",
-        displayOptions: {
-          show: {
-            operation: ["speed"],
-          },
-        },
+        displayOptions: { show: { operation: ["speed"] } },
         default: true,
         description:
-          "Whether to adjust audio pitch to match speed (recommended)",
+          "Whether to adjust audio speed to match video (recommended)",
       },
       {
         displayName: "Output Format",
         name: "speedOutputFormat",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["speed"],
-          },
-        },
+        displayOptions: { show: { operation: ["speed"] } },
         default: "mp4",
         description: "Output file format",
       },
-      // Rotate/Flip options
+      // ── Rotate/Flip ──
       {
         displayName: "Rotation",
         name: "rotation",
         type: "options",
-        displayOptions: {
-          show: {
-            operation: ["rotate"],
-          },
-        },
+        displayOptions: { show: { operation: ["rotate"] } },
         options: [
           { name: "90 degrees clockwise", value: "90" },
           { name: "90 degrees counter-clockwise", value: "270" },
@@ -572,11 +550,7 @@ export class FFmpegWasm implements INodeType {
         displayName: "Flip Horizontal",
         name: "flipHorizontal",
         type: "boolean",
-        displayOptions: {
-          show: {
-            operation: ["rotate"],
-          },
-        },
+        displayOptions: { show: { operation: ["rotate"] } },
         default: false,
         description: "Whether to flip video horizontally",
       },
@@ -584,11 +558,7 @@ export class FFmpegWasm implements INodeType {
         displayName: "Flip Vertical",
         name: "flipVertical",
         type: "boolean",
-        displayOptions: {
-          show: {
-            operation: ["rotate"],
-          },
-        },
+        displayOptions: { show: { operation: ["rotate"] } },
         default: false,
         description: "Whether to flip video vertically",
       },
@@ -596,63 +566,45 @@ export class FFmpegWasm implements INodeType {
         displayName: "Output Format",
         name: "rotateOutputFormat",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["rotate"],
-          },
-        },
+        displayOptions: { show: { operation: ["rotate"] } },
         default: "mp4",
         description: "Output file format",
       },
-      // Audio Mix options
+      // ── Audio Mix ──
       {
         displayName: "Audio Binary Properties",
         name: "audioBinaryProperties",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["audioMix"],
-          },
-        },
+        displayOptions: { show: { operation: ["audioMix"] } },
         default: "audio1,audio2",
         placeholder: "audio1,audio2,audio3",
-        description: "Comma-separated list of binary property names to mix",
+        description:
+          "Comma-separated list of binary property names to mix",
         required: true,
       },
       {
         displayName: "Output Format",
         name: "audioMixOutputFormat",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["audioMix"],
-          },
-        },
+        displayOptions: { show: { operation: ["audioMix"] } },
         default: "mp3",
         description: "Output audio format",
       },
-      // Audio Filters options
+      // ── Audio Filters ──
       {
         displayName: "Volume",
         name: "volume",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["audioFilters"],
-          },
-        },
+        displayOptions: { show: { operation: ["audioFilters"] } },
         default: 1.0,
-        description: "Volume multiplier (0.5 = half volume, 2.0 = double)",
+        description:
+          "Volume multiplier (0.5 = half volume, 2.0 = double)",
       },
       {
         displayName: "Bass Boost",
         name: "bassBoost",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["audioFilters"],
-          },
-        },
+        displayOptions: { show: { operation: ["audioFilters"] } },
         default: 0,
         description: "Bass boost in dB (0-20)",
       },
@@ -660,11 +612,7 @@ export class FFmpegWasm implements INodeType {
         displayName: "Treble Boost",
         name: "trebleBoost",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["audioFilters"],
-          },
-        },
+        displayOptions: { show: { operation: ["audioFilters"] } },
         default: 0,
         description: "Treble boost in dB (0-20)",
       },
@@ -672,98 +620,71 @@ export class FFmpegWasm implements INodeType {
         displayName: "High Pass Filter",
         name: "highPass",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["audioFilters"],
-          },
-        },
+        displayOptions: { show: { operation: ["audioFilters"] } },
         default: 0,
-        description: "High pass filter frequency in Hz (0 to disable)",
+        description:
+          "High pass filter frequency in Hz (0 to disable)",
       },
       {
         displayName: "Low Pass Filter",
         name: "lowPass",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["audioFilters"],
-          },
-        },
+        displayOptions: { show: { operation: ["audioFilters"] } },
         default: 0,
-        description: "Low pass filter frequency in Hz (0 to disable)",
+        description:
+          "Low pass filter frequency in Hz (0 to disable)",
       },
       {
         displayName: "Output Format",
         name: "audioFiltersOutputFormat",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["audioFilters"],
-          },
-        },
+        displayOptions: { show: { operation: ["audioFilters"] } },
         default: "mp3",
         description: "Output audio format",
       },
-      // Audio Normalize options
+      // ── Audio Normalize ──
       {
         displayName: "Target Loudness",
         name: "targetLoudness",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["audioNormalize"],
-          },
-        },
+        displayOptions: { show: { operation: ["audioNormalize"] } },
         default: -14,
-        description: "Target loudness in LUFS (-70 to -5, -14 is standard)",
+        description:
+          "Target loudness in LUFS (-70 to -5, -14 is standard)",
       },
       {
         displayName: "True Peak Limit",
         name: "truePeak",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["audioNormalize"],
-          },
-        },
+        displayOptions: { show: { operation: ["audioNormalize"] } },
         default: -1,
-        description: "True peak limit in dBTP (-9 to 0, -1 is standard)",
+        description:
+          "True peak limit in dBTP (-9 to 0, -1 is standard)",
       },
       {
         displayName: "Output Format",
         name: "audioNormalizeOutputFormat",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["audioNormalize"],
-          },
-        },
+        displayOptions: { show: { operation: ["audioNormalize"] } },
         default: "mp3",
         description: "Output audio format",
       },
-      // Video Overlay options
+      // ── Overlay ──
       {
         displayName: "Overlay Binary Property",
         name: "overlayBinaryProperty",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["overlay"],
-          },
-        },
+        displayOptions: { show: { operation: ["overlay"] } },
         default: "overlay",
-        description: "Name of binary property containing overlay image/video",
+        description:
+          "Name of binary property containing overlay image/video",
         required: true,
       },
       {
         displayName: "Overlay Type",
         name: "overlayType",
         type: "options",
-        displayOptions: {
-          show: {
-            operation: ["overlay"],
-          },
-        },
+        displayOptions: { show: { operation: ["overlay"] } },
         options: [
           { name: "Watermark (Image)", value: "watermark" },
           { name: "Picture-in-Picture (Video)", value: "pip" },
@@ -776,35 +697,25 @@ export class FFmpegWasm implements INodeType {
         displayName: "Position X",
         name: "overlayX",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["overlay"],
-          },
-        },
+        displayOptions: { show: { operation: ["overlay"] } },
         default: "10",
-        description: "X position (pixels or expressions like W-w-10)",
+        description:
+          "X position (pixels or expressions like W-w-10)",
       },
       {
         displayName: "Position Y",
         name: "overlayY",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["overlay"],
-          },
-        },
+        displayOptions: { show: { operation: ["overlay"] } },
         default: "10",
-        description: "Y position (pixels or expressions like H-h-10)",
+        description:
+          "Y position (pixels or expressions like H-h-10)",
       },
       {
         displayName: "Overlay Width",
         name: "overlayWidth",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["overlay"],
-          },
-        },
+        displayOptions: { show: { operation: ["overlay"] } },
         default: -1,
         description: "Overlay width (-1 for original size)",
       },
@@ -812,11 +723,7 @@ export class FFmpegWasm implements INodeType {
         displayName: "Overlay Height",
         name: "overlayHeight",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["overlay"],
-          },
-        },
+        displayOptions: { show: { operation: ["overlay"] } },
         default: -1,
         description: "Overlay height (-1 for original size)",
       },
@@ -824,11 +731,7 @@ export class FFmpegWasm implements INodeType {
         displayName: "Opacity",
         name: "overlayOpacity",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["overlay"],
-          },
-        },
+        displayOptions: { show: { operation: ["overlay"] } },
         default: 1.0,
         description: "Overlay opacity (0.0 to 1.0)",
       },
@@ -836,24 +739,16 @@ export class FFmpegWasm implements INodeType {
         displayName: "Output Format",
         name: "overlayOutputFormat",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["overlay"],
-          },
-        },
+        displayOptions: { show: { operation: ["overlay"] } },
         default: "mp4",
         description: "Output file format",
       },
-      // Subtitle Burn-in options
+      // ── Subtitle ──
       {
         displayName: "Subtitle Binary Property",
         name: "subtitleBinaryProperty",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["subtitle"],
-          },
-        },
+        displayOptions: { show: { operation: ["subtitle"] } },
         default: "subtitle",
         description:
           "Name of binary property containing subtitle file (SRT, ASS, VTT)",
@@ -863,11 +758,7 @@ export class FFmpegWasm implements INodeType {
         displayName: "Subtitle Format",
         name: "subtitleFormat",
         type: "options",
-        displayOptions: {
-          show: {
-            operation: ["subtitle"],
-          },
-        },
+        displayOptions: { show: { operation: ["subtitle"] } },
         options: [
           { name: "SRT", value: "srt" },
           { name: "ASS/SSA", value: "ass" },
@@ -881,11 +772,7 @@ export class FFmpegWasm implements INodeType {
         displayName: "Font Size",
         name: "subtitleFontSize",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["subtitle"],
-          },
-        },
+        displayOptions: { show: { operation: ["subtitle"] } },
         default: 24,
         description: "Font size for subtitles",
       },
@@ -893,35 +780,25 @@ export class FFmpegWasm implements INodeType {
         displayName: "Font Color",
         name: "subtitleFontColor",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["subtitle"],
-          },
-        },
+        displayOptions: { show: { operation: ["subtitle"] } },
         default: "white",
-        description: "Font color (white, yellow, red, etc. or hex #FFFFFF)",
+        description:
+          "Font color name (white, yellow, red, etc.) or hex (#FFFFFF)",
       },
       {
         displayName: "Background Opacity",
         name: "subtitleBgOpacity",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["subtitle"],
-          },
-        },
+        displayOptions: { show: { operation: ["subtitle"] } },
         default: 0.5,
-        description: "Background box opacity (0.0 to 1.0, 0 for transparent)",
+        description:
+          "Background box opacity (0.0 to 1.0, 0 for transparent)",
       },
       {
         displayName: "Position",
         name: "subtitlePosition",
         type: "options",
-        displayOptions: {
-          show: {
-            operation: ["subtitle"],
-          },
-        },
+        displayOptions: { show: { operation: ["subtitle"] } },
         options: [
           { name: "Bottom", value: "bottom" },
           { name: "Top", value: "top" },
@@ -934,24 +811,16 @@ export class FFmpegWasm implements INodeType {
         displayName: "Output Format",
         name: "subtitleOutputFormat",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["subtitle"],
-          },
-        },
+        displayOptions: { show: { operation: ["subtitle"] } },
         default: "mp4",
         description: "Output file format",
       },
-      // GIF/WebP Animation options
+      // ── GIF/WebP ──
       {
         displayName: "Output Format",
         name: "gifOutputFormat",
         type: "options",
-        displayOptions: {
-          show: {
-            operation: ["gif"],
-          },
-        },
+        displayOptions: { show: { operation: ["gif"] } },
         options: [
           { name: "GIF", value: "gif" },
           { name: "WebP", value: "webp" },
@@ -964,11 +833,7 @@ export class FFmpegWasm implements INodeType {
         displayName: "Width",
         name: "gifWidth",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["gif"],
-          },
-        },
+        displayOptions: { show: { operation: ["gif"] } },
         default: 480,
         description: "Output width in pixels (-1 for auto)",
       },
@@ -976,11 +841,7 @@ export class FFmpegWasm implements INodeType {
         displayName: "Height",
         name: "gifHeight",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["gif"],
-          },
-        },
+        displayOptions: { show: { operation: ["gif"] } },
         default: -1,
         description: "Output height in pixels (-1 for auto)",
       },
@@ -988,11 +849,7 @@ export class FFmpegWasm implements INodeType {
         displayName: "Frame Rate",
         name: "gifFps",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["gif"],
-          },
-        },
+        displayOptions: { show: { operation: ["gif"] } },
         default: 10,
         description: "Frames per second for animation",
       },
@@ -1000,23 +857,16 @@ export class FFmpegWasm implements INodeType {
         displayName: "Start Time",
         name: "gifStartTime",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["gif"],
-          },
-        },
+        displayOptions: { show: { operation: ["gif"] } },
         default: "00:00:00",
-        description: "Start time for animation (HH:MM:SS or seconds)",
+        description:
+          "Start time for animation (HH:MM:SS or seconds)",
       },
       {
         displayName: "Duration",
         name: "gifDuration",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["gif"],
-          },
-        },
+        displayOptions: { show: { operation: ["gif"] } },
         default: "5",
         description: "Duration of animation in seconds",
       },
@@ -1024,11 +874,7 @@ export class FFmpegWasm implements INodeType {
         displayName: "Color Palette",
         name: "gifColors",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["gif"],
-          },
-        },
+        displayOptions: { show: { operation: ["gif"] } },
         default: 128,
         description:
           "Number of colors in palette (2-256, higher = better quality)",
@@ -1037,11 +883,7 @@ export class FFmpegWasm implements INodeType {
         displayName: "Dither",
         name: "gifDither",
         type: "options",
-        displayOptions: {
-          show: {
-            operation: ["gif"],
-          },
-        },
+        displayOptions: { show: { operation: ["gif"] } },
         options: [
           { name: "None", value: "none" },
           { name: "Bayer", value: "bayer" },
@@ -1054,24 +896,16 @@ export class FFmpegWasm implements INodeType {
         displayName: "Loop",
         name: "gifLoop",
         type: "boolean",
-        displayOptions: {
-          show: {
-            operation: ["gif"],
-          },
-        },
+        displayOptions: { show: { operation: ["gif"] } },
         default: true,
         description: "Whether to loop animation infinitely",
       },
-      // Image Sequence Export options
+      // ── Image Sequence ──
       {
         displayName: "Output Format",
         name: "sequenceOutputFormat",
         type: "options",
-        displayOptions: {
-          show: {
-            operation: ["imageSequence"],
-          },
-        },
+        displayOptions: { show: { operation: ["imageSequence"] } },
         options: [
           { name: "PNG", value: "png" },
           { name: "JPEG", value: "jpg" },
@@ -1085,11 +919,7 @@ export class FFmpegWasm implements INodeType {
         displayName: "Width",
         name: "sequenceWidth",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["imageSequence"],
-          },
-        },
+        displayOptions: { show: { operation: ["imageSequence"] } },
         default: -1,
         description: "Output width in pixels (-1 for original)",
       },
@@ -1097,11 +927,7 @@ export class FFmpegWasm implements INodeType {
         displayName: "Height",
         name: "sequenceHeight",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["imageSequence"],
-          },
-        },
+        displayOptions: { show: { operation: ["imageSequence"] } },
         default: -1,
         description: "Output height in pixels (-1 for original)",
       },
@@ -1109,11 +935,7 @@ export class FFmpegWasm implements INodeType {
         displayName: "Frame Rate",
         name: "sequenceFps",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["imageSequence"],
-          },
-        },
+        displayOptions: { show: { operation: ["imageSequence"] } },
         default: 1,
         description:
           "Extract one frame every N seconds (fps=1 means 1 frame/sec)",
@@ -1122,23 +944,16 @@ export class FFmpegWasm implements INodeType {
         displayName: "Start Time",
         name: "sequenceStartTime",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["imageSequence"],
-          },
-        },
+        displayOptions: { show: { operation: ["imageSequence"] } },
         default: "00:00:00",
-        description: "Start time for extraction (HH:MM:SS or seconds)",
+        description:
+          "Start time for extraction (HH:MM:SS or seconds)",
       },
       {
         displayName: "Duration",
         name: "sequenceDuration",
         type: "string",
-        displayOptions: {
-          show: {
-            operation: ["imageSequence"],
-          },
-        },
+        displayOptions: { show: { operation: ["imageSequence"] } },
         default: "",
         description:
           "Duration to extract (seconds). Leave empty for entire video",
@@ -1147,15 +962,71 @@ export class FFmpegWasm implements INodeType {
         displayName: "Quality (JPEG/WebP)",
         name: "sequenceQuality",
         type: "number",
-        displayOptions: {
-          show: {
-            operation: ["imageSequence"],
-          },
-        },
+        displayOptions: { show: { operation: ["imageSequence"] } },
         default: 90,
         description: "JPEG/WebP quality (1-100)",
       },
-      // Additional options
+      // ── Remux ──
+      {
+        displayName: "Output Format",
+        name: "remuxOutputFormat",
+        type: "string",
+        displayOptions: { show: { operation: ["remux"] } },
+        default: "mp4",
+        placeholder: "mp4, mkv, webm, mov...",
+        description:
+          "Target container format (no re-encoding, near-instant)",
+        required: true,
+      },
+      // ── Social Media ──
+      {
+        displayName: "Platform Preset",
+        name: "socialMediaPreset",
+        type: "options",
+        displayOptions: { show: { operation: ["socialMedia"] } },
+        options: [
+          { name: "YouTube 1080p", value: "youtube_1080p" },
+          { name: "YouTube 720p", value: "youtube_720p" },
+          { name: "YouTube Shorts", value: "youtube_shorts" },
+          { name: "Instagram Feed", value: "instagram_feed" },
+          { name: "Instagram Story", value: "instagram_story" },
+          { name: "Instagram Reels", value: "instagram_reels" },
+          { name: "TikTok", value: "tiktok" },
+          { name: "Twitter / X", value: "twitter" },
+        ],
+        default: "youtube_1080p",
+        description:
+          "Pre-configured encoding settings for the target platform",
+        required: true,
+      },
+      // ── Compress to Size ──
+      {
+        displayName: "Target Size (MB)",
+        name: "targetSizeMB",
+        type: "number",
+        displayOptions: { show: { operation: ["compressToSize"] } },
+        default: 10,
+        description:
+          "Target output file size in megabytes (approximate)",
+        required: true,
+      },
+      {
+        displayName: "Audio Bitrate",
+        name: "compressAudioBitrate",
+        type: "string",
+        displayOptions: { show: { operation: ["compressToSize"] } },
+        default: "128k",
+        description: "Audio bitrate to use",
+      },
+      {
+        displayName: "Output Format",
+        name: "compressOutputFormat",
+        type: "string",
+        displayOptions: { show: { operation: ["compressToSize"] } },
+        default: "mp4",
+        description: "Output file format",
+      },
+      // ── Additional Options ──
       {
         displayName: "Additional Options",
         name: "additionalOptions",
@@ -1175,7 +1046,7 @@ export class FFmpegWasm implements INodeType {
             name: "enableLogging",
             type: "boolean",
             default: false,
-            description: "Whether to log FFmpeg output",
+            description: "Whether to log FFmpeg output to console",
           },
         ],
       },
@@ -1186,80 +1057,143 @@ export class FFmpegWasm implements INodeType {
     const items = this.getInputData();
     const returnData: INodeExecutionData[] = [];
 
-    // Initialize FFmpeg
     const ffmpeg = new FFmpeg();
 
     try {
-      // Load FFmpeg
-      await ffmpeg.load();
+      // B9: Load credentials for custom FFmpeg WASM URLs
+      const loadOptions: Record<string, string> = {};
+      try {
+        const credentials =
+          await this.getCredentials("ffmpegWasmApi");
+        if (credentials.coreURL)
+          loadOptions.coreURL = credentials.coreURL as string;
+        if (credentials.wasmURL)
+          loadOptions.wasmURL = credentials.wasmURL as string;
+        if (credentials.workerURL)
+          loadOptions.workerURL = credentials.workerURL as string;
+      } catch {
+        // Credentials not configured, use defaults
+      }
+      await ffmpeg.load(
+        Object.keys(loadOptions).length > 0 ? loadOptions : undefined,
+      );
+
+      // I6: Set up log capture once (outside item loop)
+      let lastLogOutput = "";
+      const firstOpts = this.getNodeParameter(
+        "additionalOptions",
+        0,
+        {},
+      ) as { enableLogging?: boolean };
+      ffmpeg.on("log", ({ message }: { message: string }) => {
+        lastLogOutput += message + "\n";
+        if (firstOpts.enableLogging) {
+          console.log(`FFmpeg: ${message}`);
+        }
+      });
 
       for (let i = 0; i < items.length; i++) {
         try {
           const binaryPropertyName = this.getNodeParameter(
             "binaryPropertyName",
-            i
-          ) as string;
-          const outputBinaryPropertyName = this.getNodeParameter(
-            "outputBinaryPropertyName",
-            i
+            i,
           ) as string;
           const operation = this.getNodeParameter(
             "operation",
-            i
+            i,
           ) as OperationType;
           const additionalOptions = this.getNodeParameter(
             "additionalOptions",
             i,
-            {}
-          ) as {
-            timeout?: number;
-            enableLogging?: boolean;
-          };
+            {},
+          ) as { timeout?: number; enableLogging?: boolean };
 
-          // Get input binary data
           const binaryData = items[i].binary?.[binaryPropertyName];
           if (!binaryData) {
             throw new Error(
-              `Binary data property "${binaryPropertyName}" not found`
+              `Binary data property "${binaryPropertyName}" not found`,
             );
           }
 
-          // Create unique filenames
-          const inputFilename = `input_${i}_${Date.now()}`;
+          // B7: Derive input extension from binary metadata
+          const inputExt = getInputExtension(binaryData);
+          const inputFilename = `input_${i}_${Date.now()}${inputExt}`;
           const outputFilename = `output_${i}_${Date.now()}`;
 
-          // Write input file to FFmpeg virtual filesystem
           const inputData = await this.helpers.getBinaryDataBuffer(
             i,
-            binaryPropertyName
+            binaryPropertyName,
           );
           await ffmpeg.writeFile(inputFilename, inputData);
 
-          // Prepare FFmpeg command based on operation
           let ffmpegCommand: string[] = [];
           let outputExt = "";
+
+          // ---------- metadata (F1) ----------
+          if (operation === "metadata") {
+            lastLogOutput = "";
+            await ffmpeg.exec(["-i", inputFilename, "-hide_banner"]);
+            const metadata = parseMetadataFromLogs(lastLogOutput);
+
+            returnData.push({
+              json: {
+                ...items[i].json,
+                ffmpeg: { operation, ...metadata },
+              },
+            });
+
+            try {
+              await ffmpeg.deleteFile(inputFilename);
+            } catch {}
+            continue;
+          }
+
+          const outputBinaryPropertyName = this.getNodeParameter(
+            "outputBinaryPropertyName",
+            i,
+          ) as string;
 
           switch (operation) {
             case "convert": {
               const outputFormat = this.getNodeParameter(
                 "outputFormat",
-                i
+                i,
               ) as string;
-              outputExt = outputFormat.startsWith(".")
-                ? outputFormat
-                : `.${outputFormat}`;
+              const videoCodec = this.getNodeParameter(
+                "videoCodec",
+                i,
+              ) as string;
+              const audioCodec = this.getNodeParameter(
+                "audioCodec",
+                i,
+              ) as string;
+              const crf = this.getNodeParameter("crf", i) as number;
+
+              outputExt = normalizeExtension(outputFormat);
               const outputName = `${outputFilename}${outputExt}`;
-              ffmpegCommand = ["-i", inputFilename, "-y", outputName];
+
+              ffmpegCommand = ["-i", inputFilename];
+              if (videoCodec !== "auto") {
+                ffmpegCommand.push("-c:v", videoCodec);
+              }
+              if (audioCodec !== "auto") {
+                ffmpegCommand.push("-c:a", audioCodec);
+              }
+              if (crf >= 0) {
+                ffmpegCommand.push("-crf", crf.toString());
+              }
+              ffmpegCommand.push("-y", outputName);
               break;
             }
+
             case "extractAudio": {
               const audioFormat = this.getNodeParameter(
                 "audioFormat",
-                i
+                i,
               ) as string;
               const audioQuality = this.getNodeParameter(
                 "audioQuality",
-                i
+                i,
               ) as string;
               outputExt = `.${audioFormat}`;
               const outputName = `${outputFilename}${outputExt}`;
@@ -1278,16 +1212,19 @@ export class FFmpegWasm implements INodeType {
               ];
               break;
             }
+
             case "resize": {
               const width = this.getNodeParameter("width", i) as number;
               const height = this.getNodeParameter("height", i) as number;
               const keepAspectRatio = this.getNodeParameter(
                 "keepAspectRatio",
-                i
+                i,
               ) as boolean;
               outputExt = ".mp4";
               const outputName = `${outputFilename}${outputExt}`;
-              const heightStr = keepAspectRatio ? "-1" : height.toString();
+              const heightStr = keepAspectRatio
+                ? "-1"
+                : height.toString();
               ffmpegCommand = [
                 "-i",
                 inputFilename,
@@ -1300,15 +1237,19 @@ export class FFmpegWasm implements INodeType {
               ];
               break;
             }
+
             case "thumbnail": {
-              const timestamp = this.getNodeParameter("timestamp", i) as string;
+              const timestamp = this.getNodeParameter(
+                "timestamp",
+                i,
+              ) as string;
               const thumbnailWidth = this.getNodeParameter(
                 "thumbnailWidth",
-                i
+                i,
               ) as number;
               const thumbnailHeight = this.getNodeParameter(
                 "thumbnailHeight",
-                i
+                i,
               ) as number;
               outputExt = ".jpg";
               const outputName = `${outputFilename}${outputExt}`;
@@ -1328,21 +1269,19 @@ export class FFmpegWasm implements INodeType {
               ];
               break;
             }
+
             case "custom": {
               const ffmpegArgs = this.getNodeParameter(
                 "ffmpegArgs",
-                i
+                i,
               ) as string;
               const outputExtension = this.getNodeParameter(
                 "outputExtension",
-                i
+                i,
               ) as string;
-              outputExt = outputExtension.startsWith(".")
-                ? outputExtension
-                : `.${outputExtension}`;
+              outputExt = normalizeExtension(outputExtension);
               const outputName = `${outputFilename}${outputExt}`;
 
-              // Replace placeholder names in custom arguments
               const argsString = ffmpegArgs
                 .replace(/\binput\b/g, inputFilename)
                 .replace(/\boutput\b/g, outputName);
@@ -1352,18 +1291,19 @@ export class FFmpegWasm implements INodeType {
                 .filter((arg) => arg.length > 0);
               break;
             }
+
             case "merge": {
               const videoBinaryProperties = this.getNodeParameter(
                 "videoBinaryProperties",
-                i
+                i,
               ) as string;
               const mergeOutputFormat = this.getNodeParameter(
                 "mergeOutputFormat",
-                i
+                i,
               ) as string;
               const addTransition = this.getNodeParameter(
                 "addTransition",
-                i
+                i,
               ) as boolean;
 
               const binaryProps = videoBinaryProperties
@@ -1373,41 +1313,38 @@ export class FFmpegWasm implements INodeType {
 
               if (binaryProps.length < 2) {
                 throw new Error(
-                  "At least 2 video binary properties are required for merging"
+                  "At least 2 video binary properties are required for merging",
                 );
               }
 
-              // Write all input files
               const inputFiles: string[] = [];
               for (let j = 0; j < binaryProps.length; j++) {
                 const propName = binaryProps[j];
-                const videoData = await this.helpers.getBinaryDataBuffer(
-                  i,
-                  propName
-                );
-                const inputName = `input_${i}_${j}_${Date.now()}.mp4`;
+                const propBinary = items[i].binary?.[propName];
+                // B11: Derive extension from binary data
+                const ext = propBinary
+                  ? getInputExtension(propBinary)
+                  : ".mp4";
+                const videoData =
+                  await this.helpers.getBinaryDataBuffer(i, propName);
+                const inputName = `input_${i}_${j}_${Date.now()}${ext}`;
                 await ffmpeg.writeFile(inputName, videoData);
                 inputFiles.push(inputName);
               }
 
-              // Create concat list file
               const concatList = inputFiles
                 .map((f) => `file '${f}'`)
                 .join("\n");
               const listFilename = `list_${i}_${Date.now()}.txt`;
               await ffmpeg.writeFile(
                 listFilename,
-                new TextEncoder().encode(concatList)
+                new TextEncoder().encode(concatList),
               );
 
-              outputExt = mergeOutputFormat.startsWith(".")
-                ? mergeOutputFormat
-                : `.${mergeOutputFormat}`;
+              outputExt = normalizeExtension(mergeOutputFormat);
               const outputName = `${outputFilename}${outputExt}`;
 
-              // Build concat command
               if (addTransition) {
-                // With fade transition (more complex)
                 ffmpegCommand = [
                   "-f",
                   "concat",
@@ -1416,7 +1353,7 @@ export class FFmpegWasm implements INodeType {
                   "-i",
                   listFilename,
                   "-vf",
-                  "fade=st=0:d=0.5:alpha=1,format=yuv420p",
+                  "fade=in:st=0:d=0.5,format=yuv420p",
                   "-c:v",
                   "libx264",
                   "-preset",
@@ -1425,7 +1362,6 @@ export class FFmpegWasm implements INodeType {
                   outputName,
                 ];
               } else {
-                // Simple concat (same codec, fast)
                 ffmpegCommand = [
                   "-f",
                   "concat",
@@ -1441,10 +1377,20 @@ export class FFmpegWasm implements INodeType {
               }
               break;
             }
+
             case "trim": {
-              const startTime = this.getNodeParameter("startTime", i) as string;
-              const endTime = this.getNodeParameter("endTime", i) as string;
-              const duration = this.getNodeParameter("duration", i) as string;
+              const startTime = this.getNodeParameter(
+                "startTime",
+                i,
+              ) as string;
+              const endTime = this.getNodeParameter(
+                "endTime",
+                i,
+              ) as string;
+              const duration = this.getNodeParameter(
+                "duration",
+                i,
+              ) as string;
               outputExt = ".mp4";
               const outputName = `${outputFilename}${outputExt}`;
               ffmpegCommand = ["-i", inputFilename, "-ss", startTime];
@@ -1456,36 +1402,48 @@ export class FFmpegWasm implements INodeType {
               ffmpegCommand.push("-c", "copy", "-y", outputName);
               break;
             }
+
             case "videoFilters": {
               const brightness = this.getNodeParameter(
                 "brightness",
-                i
+                i,
               ) as number;
-              const contrast = this.getNodeParameter("contrast", i) as number;
+              const contrast = this.getNodeParameter(
+                "contrast",
+                i,
+              ) as number;
               const saturation = this.getNodeParameter(
                 "saturation",
-                i
+                i,
               ) as number;
               const blur = this.getNodeParameter("blur", i) as number;
               const grayscale = this.getNodeParameter(
                 "grayscale",
-                i
+                i,
               ) as boolean;
-              const sepia = this.getNodeParameter("sepia", i) as boolean;
+              const sepia = this.getNodeParameter(
+                "sepia",
+                i,
+              ) as boolean;
               const filtersOutputFormat = this.getNodeParameter(
                 "filtersOutputFormat",
-                i
+                i,
               ) as string;
+
               const vfFilters: string[] = [];
-              if (brightness !== 0) {
-                vfFilters.push(`eq=brightness=${brightness}`);
+
+              // B3: Combine eq parameters into a single filter
+              const eqParts: string[] = [];
+              if (brightness !== 0)
+                eqParts.push(`brightness=${brightness}`);
+              if (contrast !== 1)
+                eqParts.push(`contrast=${contrast}`);
+              if (saturation !== 1)
+                eqParts.push(`saturation=${saturation}`);
+              if (eqParts.length > 0) {
+                vfFilters.push(`eq=${eqParts.join(":")}`);
               }
-              if (contrast !== 1) {
-                vfFilters.push(`eq=contrast=${contrast}`);
-              }
-              if (saturation !== 1) {
-                vfFilters.push(`eq=saturation=${saturation}`);
-              }
+
               if (blur > 0) {
                 vfFilters.push(`gblur=sigma=${blur}`);
               }
@@ -1494,13 +1452,13 @@ export class FFmpegWasm implements INodeType {
               }
               if (sepia) {
                 vfFilters.push(
-                  "colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131"
+                  "colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131",
                 );
               }
-              outputExt = filtersOutputFormat.startsWith(".")
-                ? filtersOutputFormat
-                : `.${filtersOutputFormat}`;
+
+              outputExt = normalizeExtension(filtersOutputFormat);
               const outputName = `${outputFilename}${outputExt}`;
+
               if (vfFilters.length > 0) {
                 ffmpegCommand = [
                   "-i",
@@ -1524,29 +1482,28 @@ export class FFmpegWasm implements INodeType {
               }
               break;
             }
+
             case "speed": {
               const speedValue = this.getNodeParameter(
                 "speedValue",
-                i
+                i,
               ) as string;
               const adjustAudioPitch = this.getNodeParameter(
                 "adjustAudioPitch",
-                i
+                i,
               ) as boolean;
               const speedOutputFormat = this.getNodeParameter(
                 "speedOutputFormat",
-                i
+                i,
               ) as string;
               const speed = parseFloat(speedValue);
-              outputExt = speedOutputFormat.startsWith(".")
-                ? speedOutputFormat
-                : `.${speedOutputFormat}`;
+              outputExt = normalizeExtension(speedOutputFormat);
               const outputName = `${outputFilename}${outputExt}`;
               const videoFilter = `setpts=${1 / speed}*PTS`;
+
               if (adjustAudioPitch) {
-                const audioFilter = `atempo=${
-                  speed > 2 ? 2 : speed < 0.5 ? 0.5 : speed
-                }`;
+                // B4: Build chained atempo for extreme speeds
+                const audioFilter = buildAtempoFilter(speed);
                 ffmpegCommand = [
                   "-i",
                   inputFilename,
@@ -1570,54 +1527,58 @@ export class FFmpegWasm implements INodeType {
               }
               break;
             }
+
             case "rotate": {
-              const rotation = this.getNodeParameter("rotation", i) as string;
+              const rotation = this.getNodeParameter(
+                "rotation",
+                i,
+              ) as string;
               const flipHorizontal = this.getNodeParameter(
                 "flipHorizontal",
-                i
+                i,
               ) as boolean;
               const flipVertical = this.getNodeParameter(
                 "flipVertical",
-                i
+                i,
               ) as boolean;
               const rotateOutputFormat = this.getNodeParameter(
                 "rotateOutputFormat",
-                i
+                i,
               ) as string;
-              const transposeValues: string[] = [];
+
+              const vfParts: string[] = [];
               switch (rotation) {
                 case "90":
-                  transposeValues.push("1");
+                  vfParts.push("transpose=1");
                   break;
                 case "270":
-                  transposeValues.push("2");
+                  vfParts.push("transpose=2");
                   break;
                 case "180":
-                  transposeValues.push("1,1");
+                  // B2: Two separate transpose=1 calls for 180 degrees
+                  vfParts.push("transpose=1");
+                  vfParts.push("transpose=1");
                   break;
                 case "0":
                 default:
                   break;
               }
               if (flipHorizontal) {
-                transposeValues.push("3");
+                vfParts.push("hflip");
               }
               if (flipVertical) {
-                transposeValues.push("0");
+                vfParts.push("vflip");
               }
-              outputExt = rotateOutputFormat.startsWith(".")
-                ? rotateOutputFormat
-                : `.${rotateOutputFormat}`;
+
+              outputExt = normalizeExtension(rotateOutputFormat);
               const outputName = `${outputFilename}${outputExt}`;
-              if (transposeValues.length > 0) {
-                const transposeFilter = transposeValues
-                  .map((v) => `transpose=${v}`)
-                  .join(",");
+
+              if (vfParts.length > 0) {
                 ffmpegCommand = [
                   "-i",
                   inputFilename,
                   "-vf",
-                  transposeFilter,
+                  vfParts.join(","),
                   "-c:a",
                   "copy",
                   "-y",
@@ -1635,14 +1596,15 @@ export class FFmpegWasm implements INodeType {
               }
               break;
             }
+
             case "audioMix": {
               const audioBinaryProperties = this.getNodeParameter(
                 "audioBinaryProperties",
-                i
+                i,
               ) as string;
               const audioMixOutputFormat = this.getNodeParameter(
                 "audioMixOutputFormat",
-                i
+                i,
               ) as string;
 
               const binaryProps = audioBinaryProperties
@@ -1652,36 +1614,35 @@ export class FFmpegWasm implements INodeType {
 
               if (binaryProps.length < 2) {
                 throw new Error(
-                  "At least 2 audio binary properties are required for mixing"
+                  "At least 2 audio binary properties are required for mixing",
                 );
               }
 
-              // Write all input files
               const inputFiles: string[] = [];
               for (let j = 0; j < binaryProps.length; j++) {
                 const propName = binaryProps[j];
-                const audioData = await this.helpers.getBinaryDataBuffer(
-                  i,
-                  propName
-                );
-                const inputName = `audio_input_${i}_${j}_${Date.now()}.wav`;
+                const propBinary = items[i].binary?.[propName];
+                // B12: Derive extension from binary data
+                const ext = propBinary
+                  ? getInputExtension(propBinary)
+                  : ".wav";
+                const audioData =
+                  await this.helpers.getBinaryDataBuffer(i, propName);
+                const inputName = `audio_input_${i}_${j}_${Date.now()}${ext}`;
                 await ffmpeg.writeFile(inputName, audioData);
                 inputFiles.push(inputName);
               }
 
-              outputExt = audioMixOutputFormat.startsWith(".")
-                ? audioMixOutputFormat
-                : `.${audioMixOutputFormat}`;
+              outputExt = normalizeExtension(audioMixOutputFormat);
               const outputName = `${outputFilename}${outputExt}`;
 
-              // Build amix filter with all inputs
               const filterComplex =
                 inputFiles.map((_f, idx) => `[${idx}:a]`).join("") +
                 `amix=inputs=${inputFiles.length}:duration=longest[aout]`;
 
               const inputs: string[] = [];
-              for (const _f of inputFiles) {
-                inputs.push("-i", _f);
+              for (const f of inputFiles) {
+                inputs.push("-i", f);
               }
 
               ffmpegCommand = [
@@ -1695,41 +1656,45 @@ export class FFmpegWasm implements INodeType {
               ];
               break;
             }
+
             case "audioFilters": {
-              const volume = this.getNodeParameter("volume", i) as number;
-              const bassBoost = this.getNodeParameter("bassBoost", i) as number;
+              const volume = this.getNodeParameter(
+                "volume",
+                i,
+              ) as number;
+              const bassBoost = this.getNodeParameter(
+                "bassBoost",
+                i,
+              ) as number;
               const trebleBoost = this.getNodeParameter(
                 "trebleBoost",
-                i
+                i,
               ) as number;
-              const highPass = this.getNodeParameter("highPass", i) as number;
-              const lowPass = this.getNodeParameter("lowPass", i) as number;
+              const highPass = this.getNodeParameter(
+                "highPass",
+                i,
+              ) as number;
+              const lowPass = this.getNodeParameter(
+                "lowPass",
+                i,
+              ) as number;
               const audioFiltersOutputFormat = this.getNodeParameter(
                 "audioFiltersOutputFormat",
-                i
+                i,
               ) as string;
 
               const afFilters: string[] = [];
-
-              if (volume !== 1.0) {
-                afFilters.push(`volume=${volume}`);
-              }
-              if (bassBoost > 0) {
+              if (volume !== 1.0) afFilters.push(`volume=${volume}`);
+              if (bassBoost > 0)
                 afFilters.push(`bass=g=${bassBoost}`);
-              }
-              if (trebleBoost > 0) {
+              if (trebleBoost > 0)
                 afFilters.push(`treble=g=${trebleBoost}`);
-              }
-              if (highPass > 0) {
+              if (highPass > 0)
                 afFilters.push(`highpass=f=${highPass}`);
-              }
-              if (lowPass > 0) {
+              if (lowPass > 0)
                 afFilters.push(`lowpass=f=${lowPass}`);
-              }
 
-              outputExt = audioFiltersOutputFormat.startsWith(".")
-                ? audioFiltersOutputFormat
-                : `.${audioFiltersOutputFormat}`;
+              outputExt = normalizeExtension(audioFiltersOutputFormat);
               const outputName = `${outputFilename}${outputExt}`;
 
               if (afFilters.length > 0) {
@@ -1753,119 +1718,141 @@ export class FFmpegWasm implements INodeType {
               }
               break;
             }
+
             case "audioNormalize": {
               const targetLoudness = this.getNodeParameter(
                 "targetLoudness",
-                i
+                i,
               ) as number;
-              const truePeak = this.getNodeParameter("truePeak", i) as number;
+              const truePeak = this.getNodeParameter(
+                "truePeak",
+                i,
+              ) as number;
               const audioNormalizeOutputFormat = this.getNodeParameter(
                 "audioNormalizeOutputFormat",
-                i
+                i,
               ) as string;
 
-              outputExt = audioNormalizeOutputFormat.startsWith(".")
-                ? audioNormalizeOutputFormat
-                : `.${audioNormalizeOutputFormat}`;
+              outputExt = normalizeExtension(
+                audioNormalizeOutputFormat,
+              );
               const outputName = `${outputFilename}${outputExt}`;
-
-              // Use loudnorm filter for audio normalization
-              const loudnormFilter = `loudnorm=I=${targetLoudness}:TP=${truePeak}:LRA=11`;
 
               ffmpegCommand = [
                 "-i",
                 inputFilename,
                 "-af",
-                loudnormFilter,
+                `loudnorm=I=${targetLoudness}:TP=${truePeak}:LRA=11`,
                 "-y",
                 outputName,
               ];
               break;
             }
+
             case "overlay": {
               const overlayBinaryProperty = this.getNodeParameter(
                 "overlayBinaryProperty",
-                i
+                i,
               ) as string;
               const overlayType = this.getNodeParameter(
                 "overlayType",
-                i
+                i,
               ) as string;
-              const overlayX = this.getNodeParameter("overlayX", i) as string;
-              const overlayY = this.getNodeParameter("overlayY", i) as string;
+              const overlayX = this.getNodeParameter(
+                "overlayX",
+                i,
+              ) as string;
+              const overlayY = this.getNodeParameter(
+                "overlayY",
+                i,
+              ) as string;
               const overlayWidth = this.getNodeParameter(
                 "overlayWidth",
-                i
+                i,
               ) as number;
               const overlayHeight = this.getNodeParameter(
                 "overlayHeight",
-                i
+                i,
               ) as number;
               const overlayOpacity = this.getNodeParameter(
                 "overlayOpacity",
-                i
+                i,
               ) as number;
               const overlayOutputFormat = this.getNodeParameter(
                 "overlayOutputFormat",
-                i
+                i,
               ) as string;
 
-              // Get overlay binary data
-              const overlayData = await this.helpers.getBinaryDataBuffer(
-                i,
-                overlayBinaryProperty
-              );
-              const overlayFilename = `overlay_${i}_${Date.now()}`;
+              const overlayBin =
+                items[i].binary?.[overlayBinaryProperty];
+              // B8: Include extension for format detection
+              const overlayExt = overlayBin
+                ? getInputExtension(overlayBin)
+                : ".png";
+              const overlayData =
+                await this.helpers.getBinaryDataBuffer(
+                  i,
+                  overlayBinaryProperty,
+                );
+              const overlayFilename = `overlay_${i}_${Date.now()}${overlayExt}`;
               await ffmpeg.writeFile(overlayFilename, overlayData);
 
-              outputExt = overlayOutputFormat.startsWith(".")
-                ? overlayOutputFormat
-                : `.${overlayOutputFormat}`;
+              outputExt = normalizeExtension(overlayOutputFormat);
               const outputName = `${outputFilename}${outputExt}`;
 
-              // Build overlay filter
-              let overlayFilter = "";
+              // Build the video overlay filter with named output
+              let videoFilter = "";
               if (overlayWidth > 0 || overlayHeight > 0) {
-                const widthStr =
-                  overlayWidth > 0 ? overlayWidth.toString() : "-1";
-                const heightStr =
-                  overlayHeight > 0 ? overlayHeight.toString() : "-1";
-                overlayFilter = `[1:v]scale=${widthStr}:${heightStr}`;
+                const wStr =
+                  overlayWidth > 0
+                    ? overlayWidth.toString()
+                    : "-1";
+                const hStr =
+                  overlayHeight > 0
+                    ? overlayHeight.toString()
+                    : "-1";
+                videoFilter = `[1:v]scale=${wStr}:${hStr}`;
                 if (overlayOpacity < 1.0) {
-                  overlayFilter += `,format=rgba,colorchannelmixer=aa=${overlayOpacity}`;
+                  videoFilter += `,format=rgba,colorchannelmixer=aa=${overlayOpacity}`;
                 }
-                overlayFilter += `[ovrl];[0:v][ovrl]overlay=${overlayX}:${overlayY}`;
+                videoFilter += `[ovrl];[0:v][ovrl]overlay=${overlayX}:${overlayY}[outv]`;
               } else {
                 if (overlayOpacity < 1.0) {
-                  overlayFilter = `[1:v]format=rgba,colorchannelmixer=aa=${overlayOpacity}[ovrl];[0:v][ovrl]overlay=${overlayX}:${overlayY}`;
+                  videoFilter = `[1:v]format=rgba,colorchannelmixer=aa=${overlayOpacity}[ovrl];[0:v][ovrl]overlay=${overlayX}:${overlayY}[outv]`;
                 } else {
-                  overlayFilter = `overlay=${overlayX}:${overlayY}`;
+                  videoFilter = `[0:v][1:v]overlay=${overlayX}:${overlayY}[outv]`;
                 }
               }
 
+              // B14: Differentiate PiP (mix both audio tracks) vs watermark (main audio only)
               if (overlayType === "pip") {
-                // For PiP, we want to keep both audio tracks
+                const fullFilter = `${videoFilter};[0:a][1:a]amix=inputs=2:duration=first[outa]`;
                 ffmpegCommand = [
                   "-i",
                   inputFilename,
                   "-i",
                   overlayFilename,
                   "-filter_complex",
-                  overlayFilter,
-                  "-c:a",
-                  "copy",
+                  fullFilter,
+                  "-map",
+                  "[outv]",
+                  "-map",
+                  "[outa]",
                   "-y",
                   outputName,
                 ];
               } else {
-                // For watermark, just use main audio
                 ffmpegCommand = [
                   "-i",
                   inputFilename,
                   "-i",
                   overlayFilename,
                   "-filter_complex",
-                  overlayFilter,
+                  videoFilter,
+                  "-map",
+                  "[outv]",
+                  "-map",
+                  "0:a?",
                   "-c:a",
                   "copy",
                   "-y",
@@ -1874,56 +1861,51 @@ export class FFmpegWasm implements INodeType {
               }
               break;
             }
+
             case "subtitle": {
               const subtitleBinaryProperty = this.getNodeParameter(
                 "subtitleBinaryProperty",
-                i
+                i,
               ) as string;
               const subtitleFormat = this.getNodeParameter(
                 "subtitleFormat",
-                i
+                i,
               ) as string;
               const subtitleFontSize = this.getNodeParameter(
                 "subtitleFontSize",
-                i
+                i,
               ) as number;
               const subtitleFontColor = this.getNodeParameter(
                 "subtitleFontColor",
-                i
+                i,
               ) as string;
               const subtitleBgOpacity = this.getNodeParameter(
                 "subtitleBgOpacity",
-                i
+                i,
               ) as number;
               const subtitlePosition = this.getNodeParameter(
                 "subtitlePosition",
-                i
+                i,
               ) as string;
               const subtitleOutputFormat = this.getNodeParameter(
                 "subtitleOutputFormat",
-                i
+                i,
               ) as string;
 
-              // Get subtitle binary data
-              const subtitleData = await this.helpers.getBinaryDataBuffer(
-                i,
-                subtitleBinaryProperty
-              );
+              const subtitleData =
+                await this.helpers.getBinaryDataBuffer(
+                  i,
+                  subtitleBinaryProperty,
+                );
               const subtitleFilename = `subtitle_${i}_${Date.now()}.${subtitleFormat}`;
               await ffmpeg.writeFile(subtitleFilename, subtitleData);
 
-              outputExt = subtitleOutputFormat.startsWith(".")
-                ? subtitleOutputFormat
-                : `.${subtitleOutputFormat}`;
+              outputExt = normalizeExtension(subtitleOutputFormat);
               const outputName = `${outputFilename}${outputExt}`;
 
-              // Convert color to FFmpeg format
-              let fontColor = subtitleFontColor;
-              if (fontColor.startsWith("#")) {
-                fontColor = fontColor.substring(1);
-              }
+              // B5: Convert color to proper ASS &HBBGGRR& format
+              const assColor = colorToAssFormat(subtitleFontColor);
 
-              // Determine alignment based on position (2=bottom, 6=top, 5=center)
               let alignment = "2";
               if (subtitlePosition === "top") {
                 alignment = "6";
@@ -1932,15 +1914,14 @@ export class FFmpegWasm implements INodeType {
               }
 
               let subtitleFilter = "";
-
-              // Add box if opacity > 0
               if (subtitleBgOpacity > 0) {
                 const alphaHex = Math.round(subtitleBgOpacity * 255)
                   .toString(16)
-                  .padStart(2, "0");
-                subtitleFilter = `subtitles=${subtitleFilename}:force_style='FontSize=${subtitleFontSize},PrimaryColour=&H${fontColor},Alignment=${alignment},OutlineColour=&H000000,Outline=1,BorderStyle=4,BackColour=&H${alphaHex}000000'`;
+                  .padStart(2, "0")
+                  .toUpperCase();
+                subtitleFilter = `subtitles=${subtitleFilename}:force_style='FontSize=${subtitleFontSize},PrimaryColour=${assColor},Alignment=${alignment},OutlineColour=&H00000000&,Outline=1,BorderStyle=4,BackColour=&H${alphaHex}000000&'`;
               } else {
-                subtitleFilter = `subtitles=${subtitleFilename}:force_style='FontSize=${subtitleFontSize},PrimaryColour=&H${fontColor},Alignment=${alignment}'`;
+                subtitleFilter = `subtitles=${subtitleFilename}:force_style='FontSize=${subtitleFontSize},PrimaryColour=${assColor},Alignment=${alignment}'`;
               }
 
               ffmpegCommand = [
@@ -1955,39 +1936,58 @@ export class FFmpegWasm implements INodeType {
               ];
               break;
             }
+
             case "gif": {
               const gifOutputFormat = this.getNodeParameter(
                 "gifOutputFormat",
-                i
+                i,
               ) as string;
-              const gifWidth = this.getNodeParameter("gifWidth", i) as number;
-              const gifHeight = this.getNodeParameter("gifHeight", i) as number;
-              const gifFps = this.getNodeParameter("gifFps", i) as number;
+              const gifWidth = this.getNodeParameter(
+                "gifWidth",
+                i,
+              ) as number;
+              const gifHeight = this.getNodeParameter(
+                "gifHeight",
+                i,
+              ) as number;
+              const gifFps = this.getNodeParameter(
+                "gifFps",
+                i,
+              ) as number;
               const gifStartTime = this.getNodeParameter(
                 "gifStartTime",
-                i
+                i,
               ) as string;
               const gifDuration = this.getNodeParameter(
                 "gifDuration",
-                i
+                i,
               ) as string;
-              const gifColors = this.getNodeParameter("gifColors", i) as number;
-              const gifDither = this.getNodeParameter("gifDither", i) as string;
-              const gifLoop = this.getNodeParameter("gifLoop", i) as boolean;
+              const gifColors = this.getNodeParameter(
+                "gifColors",
+                i,
+              ) as number;
+              const gifDither = this.getNodeParameter(
+                "gifDither",
+                i,
+              ) as string;
+              const gifLoop = this.getNodeParameter(
+                "gifLoop",
+                i,
+              ) as boolean;
 
               outputExt = `.${gifOutputFormat}`;
               const outputName = `${outputFilename}${outputExt}`;
 
-              // Build scale filter
-              const widthStr = gifWidth > 0 ? gifWidth.toString() : "-1";
-              const heightStr = gifHeight > 0 ? gifHeight.toString() : "-1";
-              const scaleFilter = `fps=${gifFps},scale=${widthStr}:${heightStr}:flags=lanczos`;
+              const wStr =
+                gifWidth > 0 ? gifWidth.toString() : "-1";
+              const hStr =
+                gifHeight > 0 ? gifHeight.toString() : "-1";
+              const scaleFilter = `fps=${gifFps},scale=${wStr}:${hStr}:flags=lanczos`;
 
               if (gifOutputFormat === "gif") {
-                // GIF with optimized palette
                 const loopValue = gifLoop ? "0" : "-1";
-                let gifFilter = `${scaleFilter},split[s0][s1];[s0]palettegen=${gifColors}[p];[s1][p]paletteuse=dither=${gifDither}`;
-
+                // B6: Use -filter_complex for palettegen/paletteuse pipeline
+                const gifFilter = `[0:v]${scaleFilter},split[s0][s1];[s0]palettegen=max_colors=${gifColors}[p];[s1][p]paletteuse=dither=${gifDither}`;
                 ffmpegCommand = [
                   "-ss",
                   gifStartTime,
@@ -1995,7 +1995,7 @@ export class FFmpegWasm implements INodeType {
                   gifDuration,
                   "-i",
                   inputFilename,
-                  "-vf",
+                  "-filter_complex",
                   gifFilter,
                   "-loop",
                   loopValue,
@@ -2003,7 +2003,6 @@ export class FFmpegWasm implements INodeType {
                   outputName,
                 ];
               } else {
-                // WebP animation
                 const loopValue = gifLoop ? "0" : "1";
                 ffmpegCommand = [
                   "-ss",
@@ -2022,62 +2021,64 @@ export class FFmpegWasm implements INodeType {
               }
               break;
             }
+
             case "imageSequence": {
               const sequenceOutputFormat = this.getNodeParameter(
                 "sequenceOutputFormat",
-                i
+                i,
               ) as string;
               const sequenceWidth = this.getNodeParameter(
                 "sequenceWidth",
-                i
+                i,
               ) as number;
               const sequenceHeight = this.getNodeParameter(
                 "sequenceHeight",
-                i
+                i,
               ) as number;
               const sequenceFps = this.getNodeParameter(
                 "sequenceFps",
-                i
+                i,
               ) as number;
               const sequenceStartTime = this.getNodeParameter(
                 "sequenceStartTime",
-                i
+                i,
               ) as string;
               const sequenceDuration = this.getNodeParameter(
                 "sequenceDuration",
-                i
+                i,
               ) as string;
               const sequenceQuality = this.getNodeParameter(
                 "sequenceQuality",
-                i
+                i,
               ) as number;
 
               const outputPattern = `frame_%04d.${sequenceOutputFormat}`;
 
-              // Build scale filter
-              const widthStr =
-                sequenceWidth > 0 ? sequenceWidth.toString() : "-1";
-              const heightStr =
-                sequenceHeight > 0 ? sequenceHeight.toString() : "-1";
-              let vfFilter = `fps=1/${sequenceFps},scale=${widthStr}:${heightStr}`;
+              const wStr =
+                sequenceWidth > 0
+                  ? sequenceWidth.toString()
+                  : "-1";
+              const hStr =
+                sequenceHeight > 0
+                  ? sequenceHeight.toString()
+                  : "-1";
+              const vfFilter = `fps=1/${sequenceFps},scale=${wStr}:${hStr}`;
 
-              // Prepare command
               const cmdArgs: string[] = ["-ss", sequenceStartTime];
-
               if (sequenceDuration && sequenceDuration.length > 0) {
                 cmdArgs.push("-t", sequenceDuration);
               }
-
               cmdArgs.push("-i", inputFilename, "-vf", vfFilter);
 
-              // Add quality settings for lossy formats
               if (
                 sequenceOutputFormat === "jpg" ||
                 sequenceOutputFormat === "jpeg"
               ) {
                 cmdArgs.push(
                   "-q:v",
-                  Math.round(((100 - sequenceQuality) / 100) * 31).toString()
+                  Math.round(
+                    ((100 - sequenceQuality) / 100) * 31,
+                  ).toString(),
                 );
               } else if (sequenceOutputFormat === "webp") {
                 cmdArgs.push("-q:v", sequenceQuality.toString());
@@ -2086,29 +2087,224 @@ export class FFmpegWasm implements INodeType {
               cmdArgs.push("-y", outputPattern);
               ffmpegCommand = cmdArgs;
 
-              // Note: For image sequence, output will be multiple files
-              // We'll need to handle this differently
-              outputExt = `.${sequenceOutputFormat}`;
+              // B15: Execute with timeout
+              const seqTimeoutMs =
+                (additionalOptions.timeout || 300) * 1000;
+              lastLogOutput = "";
+              await Promise.race([
+                ffmpeg.exec(ffmpegCommand),
+                new Promise<never>((_, reject) =>
+                  setTimeout(
+                    () =>
+                      reject(
+                        new Error(
+                          `FFmpeg timed out after ${additionalOptions.timeout || 300}s`,
+                        ),
+                      ),
+                    seqTimeoutMs,
+                  ),
+                ),
+              ]);
+
+              // B1: Read all generated frame files
+              const mimeType =
+                getMimeTypeFromExtension(sequenceOutputFormat);
+              let frameIndex = 1;
+              while (true) {
+                const frameName = `frame_${String(frameIndex).padStart(4, "0")}.${sequenceOutputFormat}`;
+                try {
+                  const frameData = (await ffmpeg.readFile(
+                    frameName,
+                  )) as Uint8Array;
+                  returnData.push({
+                    json: {
+                      ...items[i].json,
+                      ffmpeg: {
+                        operation,
+                        inputFilename:
+                          binaryData.fileName || "input",
+                        outputFilename: frameName,
+                        frameIndex,
+                        size: frameData.length,
+                      },
+                    },
+                    binary: {
+                      [outputBinaryPropertyName]: {
+                        data: Buffer.from(frameData).toString(
+                          "base64",
+                        ),
+                        fileName: frameName,
+                        mimeType,
+                      },
+                    },
+                  });
+                  await ffmpeg.deleteFile(frameName);
+                  frameIndex++;
+                } catch {
+                  break;
+                }
+              }
+
+              try {
+                await ffmpeg.deleteFile(inputFilename);
+              } catch {}
+              continue;
+            }
+
+            case "remux": {
+              const remuxOutputFormat = this.getNodeParameter(
+                "remuxOutputFormat",
+                i,
+              ) as string;
+              outputExt = normalizeExtension(remuxOutputFormat);
+              const outputName = `${outputFilename}${outputExt}`;
+              ffmpegCommand = [
+                "-i",
+                inputFilename,
+                "-c",
+                "copy",
+                "-y",
+                outputName,
+              ];
               break;
             }
+
+            case "socialMedia": {
+              const presetKey = this.getNodeParameter(
+                "socialMediaPreset",
+                i,
+              ) as string;
+              const preset = SOCIAL_MEDIA_PRESETS[presetKey];
+              if (!preset) {
+                throw new Error(
+                  `Unknown social media preset: ${presetKey}`,
+                );
+              }
+
+              outputExt = ".mp4";
+              const outputName = `${outputFilename}${outputExt}`;
+
+              ffmpegCommand = [
+                "-i",
+                inputFilename,
+                "-vf",
+                `scale=${preset.width}:${preset.height}:force_original_aspect_ratio=decrease,pad=${preset.width}:${preset.height}:(ow-iw)/2:(oh-ih)/2`,
+                "-r",
+                preset.fps.toString(),
+                "-c:v",
+                "libx264",
+                "-b:v",
+                preset.videoBitrate,
+                "-c:a",
+                "aac",
+                "-b:a",
+                preset.audioBitrate,
+                "-movflags",
+                "+faststart",
+              ];
+              if (preset.maxDuration) {
+                ffmpegCommand.push(
+                  "-t",
+                  preset.maxDuration.toString(),
+                );
+              }
+              ffmpegCommand.push("-y", outputName);
+              break;
+            }
+
+            case "compressToSize": {
+              const targetSizeMB = this.getNodeParameter(
+                "targetSizeMB",
+                i,
+              ) as number;
+              const compressAudioBitrate = this.getNodeParameter(
+                "compressAudioBitrate",
+                i,
+              ) as string;
+              const compressOutputFormat = this.getNodeParameter(
+                "compressOutputFormat",
+                i,
+              ) as string;
+
+              outputExt = normalizeExtension(compressOutputFormat);
+              const outputName = `${outputFilename}${outputExt}`;
+
+              // Get duration from metadata to calculate target bitrate
+              lastLogOutput = "";
+              await ffmpeg.exec([
+                "-i",
+                inputFilename,
+                "-hide_banner",
+              ]);
+              const meta = parseMetadataFromLogs(lastLogOutput);
+              const durationSec = meta.durationSeconds || 60;
+
+              const audioBitrateKbps =
+                parseInt(compressAudioBitrate) || 128;
+              const targetBitsPerSec =
+                (targetSizeMB * 8 * 1024 * 1024) / durationSec;
+              const videoBitrate = Math.max(
+                100,
+                Math.floor(targetBitsPerSec / 1000 - audioBitrateKbps),
+              );
+
+              ffmpegCommand = [
+                "-i",
+                inputFilename,
+                "-c:v",
+                "libx264",
+                "-b:v",
+                `${videoBitrate}k`,
+                "-maxrate",
+                `${Math.floor(videoBitrate * 1.5)}k`,
+                "-bufsize",
+                `${videoBitrate * 2}k`,
+                "-c:a",
+                "aac",
+                "-b:a",
+                compressAudioBitrate,
+                "-movflags",
+                "+faststart",
+                "-y",
+                outputName,
+              ];
+              break;
+            }
+
             default:
               throw new Error(`Unknown operation: ${operation}`);
           }
 
-          // Execute FFmpeg command
-          if (additionalOptions.enableLogging) {
-            ffmpeg.on("log", ({ message }: { message: string }) => {
-              console.log(`FFmpeg: ${message}`);
-            });
-          }
+          // B15: Execute with timeout
+          const timeoutMs =
+            (additionalOptions.timeout || 300) * 1000;
+          lastLogOutput = "";
+          await Promise.race([
+            ffmpeg.exec(ffmpegCommand),
+            new Promise<never>((_, reject) =>
+              setTimeout(
+                () =>
+                  reject(
+                    new Error(
+                      `FFmpeg timed out after ${additionalOptions.timeout || 300}s`,
+                    ),
+                  ),
+                timeoutMs,
+              ),
+            ),
+          ]);
 
-          await ffmpeg.exec(ffmpegCommand);
-
-          // Read output file
+          // Read output
           const outputName = `${outputFilename}${outputExt}`;
-          const outputData = (await ffmpeg.readFile(outputName)) as Uint8Array;
+          const outputData = (await ffmpeg.readFile(
+            outputName,
+          )) as Uint8Array;
 
-          // Prepare output item
+          // B13: Compute correct MIME type from output extension
+          const outputMimeType = getMimeTypeFromExtension(
+            outputExt.replace(".", ""),
+          );
+
           const outputItem: INodeExecutionData = {
             json: {
               ...items[i].json,
@@ -2121,28 +2317,28 @@ export class FFmpegWasm implements INodeType {
             },
             binary: {
               [outputBinaryPropertyName]: {
-                ...binaryData,
                 data: Buffer.from(outputData).toString("base64"),
                 fileName: outputName,
+                mimeType: outputMimeType,
               },
             },
           };
 
           returnData.push(outputItem);
 
-          // Cleanup virtual filesystem
           try {
             await ffmpeg.deleteFile(inputFilename);
             await ffmpeg.deleteFile(outputName);
-          } catch (cleanupError) {
-            // Ignore cleanup errors
-          }
+          } catch {}
         } catch (error) {
           if (this.continueOnFail()) {
             returnData.push({
               json: {
                 ...items[i].json,
-                error: error instanceof Error ? error.message : "Unknown error",
+                error:
+                  error instanceof Error
+                    ? error.message
+                    : "Unknown error",
               },
             });
           } else {
@@ -2151,12 +2347,8 @@ export class FFmpegWasm implements INodeType {
         }
       }
     } finally {
-      // Cleanup FFmpeg instance
-      try {
-        await ffmpeg.deleteFile(".");
-      } catch (e) {
-        // Ignore cleanup errors
-      }
+      // B10: Properly terminate FFmpeg WASM instance
+      ffmpeg.terminate();
     }
 
     return [returnData];

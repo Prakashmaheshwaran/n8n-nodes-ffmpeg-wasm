@@ -1,0 +1,10 @@
+{
+  "root": true,
+  "parser": "@typescript-eslint/parser",
+  "plugins": ["eslint-plugin-n8n-nodes-base"],
+  "parserOptions": {
+    "ecmaVersion": 2020,
+    "sourceType": "module"
+  },
+  "ignorePatterns": ["dist/**", "node_modules/**", "**/*.test.ts", "**/*.spec.ts"]
+}

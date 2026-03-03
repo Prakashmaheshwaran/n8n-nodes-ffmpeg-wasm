@@ -1,17 +1,14 @@
-import type {
-  ICredentialType,
-  NodePropertyTypes,
-} from "n8n-workflow";
+import type { ICredentialType, INodeProperties } from "n8n-workflow";
 
 export class FFmpegWasmApi implements ICredentialType {
   name = "ffmpegWasmApi";
   displayName = "FFmpeg.wasm API";
   documentationUrl = "https://ffmpegwasm.netlify.app/docs/overview";
-  properties = [
+  properties: INodeProperties[] = [
     {
       displayName: "Core URL",
       name: "coreURL",
-      type: "string" as NodePropertyTypes,
+      type: "string",
       default: "",
       placeholder:
         "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js",
@@ -21,7 +18,7 @@ export class FFmpegWasmApi implements ICredentialType {
     {
       displayName: "Wasm URL",
       name: "wasmURL",
-      type: "string" as NodePropertyTypes,
+      type: "string",
       default: "",
       placeholder:
         "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.wasm",
@@ -31,7 +28,7 @@ export class FFmpegWasmApi implements ICredentialType {
     {
       displayName: "Worker URL",
       name: "workerURL",
-      type: "string" as NodePropertyTypes,
+      type: "string",
       default: "",
       placeholder:
         "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.worker.js",
