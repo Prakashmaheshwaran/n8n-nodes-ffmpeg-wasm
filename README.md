@@ -1,5 +1,9 @@
 # n8n-nodes-ffmpeg-wasm
 
+<p align="center">
+  <img src="logo.png" alt="FFmpeg n8n Node Logo" width="200">
+</p>
+
 [![NPM Version](https://img.shields.io/npm/v/n8n-nodes-ffmpeg-wasm.svg)](https://www.npmjs.com/package/n8n-nodes-ffmpeg-wasm)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
