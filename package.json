@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-ffmpeg-wasm",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "description": "n8n community node for FFmpeg using ffmpeg.wasm - process audio and video files directly in your workflows",
   "keywords": [
     "n8n",
@@ -68,8 +68,12 @@
     "typescript": "^5.3.0"
   },
   "dependencies": {
-    "@ffmpeg/ffmpeg": "^0.11.6"
+    "@ffmpeg/ffmpeg": "0.11.6",
+    "@ffmpeg/core": "0.11.0"
   },
+  "bundledDependencies": [
+    "@ffmpeg/ffmpeg"
+  ],
   "peerDependencies": {
     "n8n-workflow": ">=1.0.0"
   }
