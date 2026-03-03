@@ -6,5 +6,15 @@
     "ecmaVersion": 2020,
     "sourceType": "module"
   },
-  "ignorePatterns": ["dist/**", "node_modules/**", "**/*.test.ts", "**/*.spec.ts"]
+  "ignorePatterns": [
+    "dist/**",
+    "node_modules/**",
+    "**/*.test.ts",
+    "**/*.spec.ts"
+  ],
+  "overrides": [
+    {
+      "files": ["nodes/**/*.{ts,tsx}", "credentials/**/*.{ts,tsx}"]
+    }
+  ]
 }
