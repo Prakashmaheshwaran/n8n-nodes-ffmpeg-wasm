@@ -20,8 +20,6 @@
 
 ## Installation
 
-### Method 1: Install from NPM (Recommended)
-
 ```bash
 cd ~/.n8n/custom
 npm install n8n-nodes-ffmpeg-wasm
@@ -29,24 +27,7 @@ npm install n8n-nodes-ffmpeg-wasm
 
 Restart n8n and the node will be available in the node panel.
 
-### Method 2: Install from GitHub
-
-```bash
-cd ~/.n8n/custom
-npm install github:Prakashmaheshwaran/n8n-nodes-ffmpeg-wasm
-```
-
-### Method 3: Local Development
-
-```bash
-git clone https://github.com/Prakashmaheshwaran/n8n-nodes-ffmpeg-wasm.git
-cd n8n-nodes-ffmpeg-wasm
-npm install
-npm run build
-npm link
-# In your n8n installation directory:
-npm link n8n-nodes-ffmpeg-wasm
-```
+> **Note:** This node requires n8n version 1.0 or higher.
 
 ## Operations
 
