@@ -1057,6 +1057,15 @@ export class FFmpegWasm implements INodeType {
     const items = this.getInputData();
     const returnData: INodeExecutionData[] = [];
 
+    try {
+      require.resolve("@ffmpeg/core");
+    } catch {
+      throw new Error(
+        "FFmpeg.wasm core module (@ffmpeg/core) is not installed. " +
+        "Please uninstall and reinstall the n8n-nodes-ffmpeg-wasm community node.",
+      );
+    }
+
     let corePath: string | undefined;
     try {
       const credentials =
@@ -1084,7 +1093,25 @@ export class FFmpegWasm implements INodeType {
     });
 
     try {
-      await ffmpeg.load();
+      // Node.js 18+ has global fetch() which breaks Emscripten's WASM loading:
+      // it tries to fetch(filePath) instead of using fs.readFileSync().
+      // Temporarily remove fetch to force the Node.js file-loading path.
+      const globalAny = globalThis as Record<string, unknown>;
+      const savedFetch = globalAny.fetch;
+      try {
+        delete globalAny.fetch;
+        await ffmpeg.load();
+      } catch (loadError) {
+        const msg = loadError instanceof Error
+          ? loadError.message
+          : String(loadError);
+        throw new Error(
+          `Failed to initialize FFmpeg.wasm: ${msg}. ` +
+          `Ensure the n8n instance has sufficient memory (512MB+ recommended).`,
+        );
+      } finally {
+        globalAny.fetch = savedFetch;
+      }
 
       for (let i = 0; i < items.length; i++) {
         try {
@@ -1126,7 +1153,10 @@ export class FFmpegWasm implements INodeType {
           if (operation === "metadata") {
             lastLogOutput = "";
             try {
-              await ffmpeg.run("-i", inputFilename, "-hide_banner");
+              await Promise.race([
+                ffmpeg.run("-i", inputFilename, "-hide_banner"),
+                new Promise<void>((resolve) => setTimeout(resolve, 10000)),
+              ]);
             } catch {
               // Expected: ffmpeg exits with error when no output is specified
             }
@@ -2217,11 +2247,10 @@ export class FFmpegWasm implements INodeType {
 
               lastLogOutput = "";
               try {
-                await ffmpeg.run(
-                  "-i",
-                  inputFilename,
-                  "-hide_banner",
-                );
+                await Promise.race([
+                  ffmpeg.run("-i", inputFilename, "-hide_banner"),
+                  new Promise<void>((resolve) => setTimeout(resolve, 10000)),
+                ]);
               } catch {
                 // Expected: ffmpeg exits with error when no output is specified
               }
@@ -2332,7 +2361,9 @@ export class FFmpegWasm implements INodeType {
         }
       }
     } finally {
-      ffmpeg.exit();
+      if (ffmpeg.isLoaded()) {
+        try { ffmpeg.exit(); } catch {}
+      }
     }
 
     return [returnData];
