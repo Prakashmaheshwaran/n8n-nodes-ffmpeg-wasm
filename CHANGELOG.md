@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.9] - 2026-03-05
+
+### Fixed
+- Fixed SVG icon path in build output - icon now correctly displays in n8n UI
+- Updated gulp build configuration to place icons in correct directory structure
+
 ## [1.1.0] - 2026-03-02
 
 ### Added

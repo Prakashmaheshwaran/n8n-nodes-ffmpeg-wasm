@@ -209,6 +209,10 @@ n8n-nodes-ffmpeg-wasm/
 - Expected with WASM. Use **Remux** for format changes without re-encoding.
 - Consider native FFmpeg for batch processing of large files.
 
+**Icon not displaying in n8n**
+- This was fixed in v1.2.9. The FFmpeg icon now displays correctly in the n8n node panel.
+- If you're on an older version, please update to the latest version.
+
 ## Contributing
 
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
