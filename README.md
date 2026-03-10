@@ -1,7 +1,7 @@
 # n8n-nodes-ffmpeg-wasm
 
 <p align="center">
-  <img src="logo.png" alt="FFmpeg n8n Node Logo" width="200">
+  <img src="nodes/FFmpegWasm/ffmpeg.svg" alt="FFmpeg n8n Node Logo" width="128">
 </p>
 
 [![NPM Version](https://img.shields.io/npm/v/n8n-nodes-ffmpeg-wasm.svg)](https://www.npmjs.com/package/n8n-nodes-ffmpeg-wasm)
@@ -208,6 +208,10 @@ n8n-nodes-ffmpeg-wasm/
 **Slow performance**
 - Expected with WASM. Use **Remux** for format changes without re-encoding.
 - Consider native FFmpeg for batch processing of large files.
+
+**Icon not displaying in n8n**
+- This was fixed in v1.2.9. The FFmpeg icon now displays correctly in the n8n node panel.
+- If you're on an older version, please update to the latest version.
 
 ## Contributing
 

@@ -4,14 +4,13 @@ const svgmin = require('gulp-svgmin');
 // Optimize SVG icons
 function buildIcons() {
   return gulp
-    .src('nodes/**/*/*.svg')
+    .src('nodes/**/*.svg')
     .pipe(svgmin({
       plugins: [
-        { removeViewBox: false },
-        { removeDimensions: true }
+        { name: 'removeViewBox', active: false }
       ]
     }))
-    .pipe(gulp.dest('dist'));
+    .pipe(gulp.dest('dist/nodes'));
 }
 
 // Watch for changes
