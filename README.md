@@ -1,7 +1,7 @@
 # n8n-nodes-ffmpeg-wasm
 
 <p align="center">
-  <img src="logo.png" alt="FFmpeg n8n Node Logo" width="200">
+  <img src="nodes/FFmpegWasm/ffmpeg.svg" alt="FFmpeg n8n Node Logo" width="128">
 </p>
 
 [![NPM Version](https://img.shields.io/npm/v/n8n-nodes-ffmpeg-wasm.svg)](https://www.npmjs.com/package/n8n-nodes-ffmpeg-wasm)
