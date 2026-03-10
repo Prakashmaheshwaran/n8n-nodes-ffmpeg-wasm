@@ -8,12 +8,31 @@ import { createFFmpeg } from "@ffmpeg/ffmpeg";
 import {
   getInputExtension,
   getMimeTypeFromExtension,
-  normalizeExtension,
-  colorToAssFormat,
-  buildAtempoFilter,
-  parseMetadataFromLogs,
-  SOCIAL_MEDIA_PRESETS,
 } from "./helpers";
+import type { HandlerParams, CommandResult } from "./types";
+import {
+  handleConvert,
+  handleRemux,
+  handleExtractAudio,
+  handleAudioMix,
+  handleAudioFilters,
+  handleAudioNormalize,
+  handleResize,
+  handleThumbnail,
+  handleVideoFilters,
+  handleSpeed,
+  handleRotate,
+  handleMerge,
+  handleOverlay,
+  handleSubtitle,
+  handleGif,
+  handleImageSequence,
+  readImageSequenceFrames,
+  handleSocialMedia,
+  handleCompressToSize,
+  handleMetadata,
+  handleCustom,
+} from "./operations";
 
 type OperationType =
   | "convert"
@@ -1048,6 +1067,28 @@ export class FFmpegWasm implements INodeType {
             default: false,
             description: "Whether to log FFmpeg output to console",
           },
+          {
+            displayName: "Encoding Preset",
+            name: "encodingPreset",
+            type: "options",
+            default: "ultrafast",
+            description:
+              "Encoding speed preset for x264/x265. Faster presets produce larger files but process much quicker in WebAssembly",
+            options: [
+              {
+                name: "Ultra Fast (fastest, larger files)",
+                value: "ultrafast",
+              },
+              { name: "Super Fast", value: "superfast" },
+              { name: "Very Fast", value: "veryfast" },
+              { name: "Faster", value: "faster" },
+              { name: "Fast", value: "fast" },
+              {
+                name: "Medium (FFmpeg default, slowest)",
+                value: "medium",
+              },
+            ],
+          },
         ],
       },
     ],
@@ -1077,17 +1118,21 @@ export class FFmpegWasm implements INodeType {
       // Credentials not configured, use defaults
     }
 
-    let lastLogOutput = "";
     const firstOpts = this.getNodeParameter(
       "additionalOptions",
       0,
       {},
     ) as { enableLogging?: boolean };
 
+    // Use array-based logging to avoid O(n^2) string concatenation
+    const logLines: string[] = [];
+    const getLog = () => logLines.join("\n");
+    const resetLog = () => { logLines.length = 0; };
+
     const ffmpeg = createFFmpeg({
       log: firstOpts.enableLogging || false,
       logger: ({ message }: { message: string }) => {
-        lastLogOutput += message + "\n";
+        logLines.push(message);
       },
       ...(corePath ? { corePath } : {}),
     });
@@ -1127,7 +1172,11 @@ export class FFmpegWasm implements INodeType {
             "additionalOptions",
             i,
             {},
-          ) as { timeout?: number; enableLogging?: boolean };
+          ) as {
+            timeout?: number;
+            enableLogging?: boolean;
+            encodingPreset?: string;
+          };
 
           const binaryData = items[i].binary?.[binaryPropertyName];
           if (!binaryData) {
@@ -1146,32 +1195,33 @@ export class FFmpegWasm implements INodeType {
           );
           ffmpeg.FS("writeFile", inputFilename, new Uint8Array(inputData));
 
-          let ffmpegCommand: string[] = [];
-          let outputExt = "";
+          const preset = additionalOptions.encodingPreset || "ultrafast";
 
-          // ---------- metadata ----------
+          const handlerParams: HandlerParams = {
+            ctx: this,
+            ffmpeg,
+            i,
+            inputFilename,
+            outputFilename,
+            items,
+            preset,
+            getLog,
+            resetLog,
+          };
+
+          // ── Metadata (special: no output file) ──
           if (operation === "metadata") {
-            lastLogOutput = "";
-            try {
-              await Promise.race([
-                ffmpeg.run("-i", inputFilename, "-hide_banner"),
-                new Promise<void>((resolve) => setTimeout(resolve, 10000)),
-              ]);
-            } catch {
-              // Expected: ffmpeg exits with error when no output is specified
-            }
-            const metadata = parseMetadataFromLogs(lastLogOutput);
+            const result = await handleMetadata(handlerParams);
 
             returnData.push({
               json: {
                 ...items[i].json,
-                ffmpeg: { operation, ...metadata },
+                ffmpeg: { operation, ...result.metadata },
               },
             });
 
-            try {
-              ffmpeg.FS("unlink", inputFilename);
-            } catch {}
+            safeUnlink(ffmpeg, inputFilename);
+            for (const f of result.tempFiles) safeUnlink(ffmpeg, f);
             continue;
           }
 
@@ -1180,1126 +1230,93 @@ export class FFmpegWasm implements INodeType {
             i,
           ) as string;
 
-          switch (operation) {
-            case "convert": {
-              const outputFormat = this.getNodeParameter(
-                "outputFormat",
-                i,
-              ) as string;
-              const videoCodec = this.getNodeParameter(
-                "videoCodec",
-                i,
-              ) as string;
-              const audioCodec = this.getNodeParameter(
-                "audioCodec",
-                i,
-              ) as string;
-              const crf = this.getNodeParameter("crf", i) as number;
+          // ── Image Sequence (special: multiple output files) ──
+          if (operation === "imageSequence") {
+            const result = await handleImageSequence(handlerParams);
 
-              outputExt = normalizeExtension(outputFormat);
-              const outputName = `${outputFilename}${outputExt}`;
+            const seqTimeoutMs =
+              (additionalOptions.timeout || 300) * 1000;
+            resetLog();
 
-              ffmpegCommand = ["-i", inputFilename];
-              if (videoCodec !== "auto") {
-                ffmpegCommand.push("-c:v", videoCodec);
-              }
-              if (audioCodec !== "auto") {
-                ffmpegCommand.push("-c:a", audioCodec);
-              }
-              if (crf >= 0) {
-                ffmpegCommand.push("-crf", crf.toString());
-              }
-              ffmpegCommand.push("-y", outputName);
-              break;
-            }
-
-            case "extractAudio": {
-              const audioFormat = this.getNodeParameter(
-                "audioFormat",
-                i,
-              ) as string;
-              const audioQuality = this.getNodeParameter(
-                "audioQuality",
-                i,
-              ) as string;
-              outputExt = `.${audioFormat}`;
-              const outputName = `${outputFilename}${outputExt}`;
-              ffmpegCommand = [
-                "-i",
-                inputFilename,
-                "-vn",
-                "-ar",
-                "44100",
-                "-ac",
-                "2",
-                "-b:a",
-                audioQuality,
-                "-y",
-                outputName,
-              ];
-              break;
-            }
-
-            case "resize": {
-              const width = this.getNodeParameter("width", i) as number;
-              const height = this.getNodeParameter("height", i) as number;
-              const keepAspectRatio = this.getNodeParameter(
-                "keepAspectRatio",
-                i,
-              ) as boolean;
-              outputExt = ".mp4";
-              const outputName = `${outputFilename}${outputExt}`;
-              const heightStr = keepAspectRatio
-                ? "-1"
-                : height.toString();
-              ffmpegCommand = [
-                "-i",
-                inputFilename,
-                "-vf",
-                `scale=${width}:${heightStr}`,
-                "-c:a",
-                "copy",
-                "-y",
-                outputName,
-              ];
-              break;
-            }
-
-            case "thumbnail": {
-              const timestamp = this.getNodeParameter(
-                "timestamp",
-                i,
-              ) as string;
-              const thumbnailWidth = this.getNodeParameter(
-                "thumbnailWidth",
-                i,
-              ) as number;
-              const thumbnailHeight = this.getNodeParameter(
-                "thumbnailHeight",
-                i,
-              ) as number;
-              outputExt = ".jpg";
-              const outputName = `${outputFilename}${outputExt}`;
-              ffmpegCommand = [
-                "-ss",
-                timestamp,
-                "-i",
-                inputFilename,
-                "-vframes",
-                "1",
-                "-q:v",
-                "2",
-                "-vf",
-                `scale=${thumbnailWidth}:${thumbnailHeight}`,
-                "-y",
-                outputName,
-              ];
-              break;
-            }
-
-            case "custom": {
-              const ffmpegArgs = this.getNodeParameter(
-                "ffmpegArgs",
-                i,
-              ) as string;
-              const outputExtension = this.getNodeParameter(
-                "outputExtension",
-                i,
-              ) as string;
-              outputExt = normalizeExtension(outputExtension);
-              const outputName = `${outputFilename}${outputExt}`;
-
-              const argsString = ffmpegArgs
-                .replace(/\binput\b/g, inputFilename)
-                .replace(/\boutput\b/g, outputName);
-
-              ffmpegCommand = argsString
-                .split(/\s+/)
-                .filter((arg) => arg.length > 0);
-              break;
-            }
-
-            case "merge": {
-              const videoBinaryProperties = this.getNodeParameter(
-                "videoBinaryProperties",
-                i,
-              ) as string;
-              const mergeOutputFormat = this.getNodeParameter(
-                "mergeOutputFormat",
-                i,
-              ) as string;
-              const addTransition = this.getNodeParameter(
-                "addTransition",
-                i,
-              ) as boolean;
-
-              const binaryProps = videoBinaryProperties
-                .split(",")
-                .map((p) => p.trim())
-                .filter((p) => p.length > 0);
-
-              if (binaryProps.length < 2) {
-                throw new Error(
-                  "At least 2 video binary properties are required for merging",
+            let seqTimeoutId: ReturnType<typeof setTimeout>;
+            await Promise.race([
+              ffmpeg.run(...result.command),
+              new Promise<never>((_, reject) => {
+                seqTimeoutId = setTimeout(
+                  () => reject(new Error(
+                    `FFmpeg timed out after ${additionalOptions.timeout || 300}s`,
+                  )),
+                  seqTimeoutMs,
                 );
-              }
-
-              const inputFiles: string[] = [];
-              for (let j = 0; j < binaryProps.length; j++) {
-                const propName = binaryProps[j];
-                const propBinary = items[i].binary?.[propName];
-                const ext = propBinary
-                  ? getInputExtension(propBinary)
-                  : ".mp4";
-                const videoData =
-                  await this.helpers.getBinaryDataBuffer(i, propName);
-                const inputName = `input_${i}_${j}_${Date.now()}${ext}`;
-                ffmpeg.FS("writeFile", inputName, new Uint8Array(videoData));
-                inputFiles.push(inputName);
-              }
-
-              const concatList = inputFiles
-                .map((f) => `file '${f}'`)
-                .join("\n");
-              const listFilename = `list_${i}_${Date.now()}.txt`;
-              ffmpeg.FS(
-                "writeFile",
-                listFilename,
-                new TextEncoder().encode(concatList),
-              );
-
-              outputExt = normalizeExtension(mergeOutputFormat);
-              const outputName = `${outputFilename}${outputExt}`;
-
-              if (addTransition) {
-                ffmpegCommand = [
-                  "-f",
-                  "concat",
-                  "-safe",
-                  "0",
-                  "-i",
-                  listFilename,
-                  "-vf",
-                  "fade=in:st=0:d=0.5,format=yuv420p",
-                  "-c:v",
-                  "libx264",
-                  "-preset",
-                  "fast",
-                  "-y",
-                  outputName,
-                ];
-              } else {
-                ffmpegCommand = [
-                  "-f",
-                  "concat",
-                  "-safe",
-                  "0",
-                  "-i",
-                  listFilename,
-                  "-c",
-                  "copy",
-                  "-y",
-                  outputName,
-                ];
-              }
-              break;
-            }
-
-            case "trim": {
-              const startTime = this.getNodeParameter(
-                "startTime",
-                i,
-              ) as string;
-              const endTime = this.getNodeParameter(
-                "endTime",
-                i,
-              ) as string;
-              const duration = this.getNodeParameter(
-                "duration",
-                i,
-              ) as string;
-              outputExt = ".mp4";
-              const outputName = `${outputFilename}${outputExt}`;
-              ffmpegCommand = ["-i", inputFilename, "-ss", startTime];
-              if (duration) {
-                ffmpegCommand.push("-t", duration);
-              } else if (endTime) {
-                ffmpegCommand.push("-to", endTime);
-              }
-              ffmpegCommand.push("-c", "copy", "-y", outputName);
-              break;
-            }
-
-            case "videoFilters": {
-              const brightness = this.getNodeParameter(
-                "brightness",
-                i,
-              ) as number;
-              const contrast = this.getNodeParameter(
-                "contrast",
-                i,
-              ) as number;
-              const saturation = this.getNodeParameter(
-                "saturation",
-                i,
-              ) as number;
-              const blur = this.getNodeParameter("blur", i) as number;
-              const grayscale = this.getNodeParameter(
-                "grayscale",
-                i,
-              ) as boolean;
-              const sepia = this.getNodeParameter(
-                "sepia",
-                i,
-              ) as boolean;
-              const filtersOutputFormat = this.getNodeParameter(
-                "filtersOutputFormat",
-                i,
-              ) as string;
-
-              const vfFilters: string[] = [];
-
-              const eqParts: string[] = [];
-              if (brightness !== 0)
-                eqParts.push(`brightness=${brightness}`);
-              if (contrast !== 1)
-                eqParts.push(`contrast=${contrast}`);
-              if (saturation !== 1)
-                eqParts.push(`saturation=${saturation}`);
-              if (eqParts.length > 0) {
-                vfFilters.push(`eq=${eqParts.join(":")}`);
-              }
-
-              if (blur > 0) {
-                vfFilters.push(`gblur=sigma=${blur}`);
-              }
-              if (grayscale) {
-                vfFilters.push("format=gray");
-              }
-              if (sepia) {
-                vfFilters.push(
-                  "colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131",
-                );
-              }
-
-              outputExt = normalizeExtension(filtersOutputFormat);
-              const outputName = `${outputFilename}${outputExt}`;
-
-              if (vfFilters.length > 0) {
-                ffmpegCommand = [
-                  "-i",
-                  inputFilename,
-                  "-vf",
-                  vfFilters.join(","),
-                  "-c:a",
-                  "copy",
-                  "-y",
-                  outputName,
-                ];
-              } else {
-                ffmpegCommand = [
-                  "-i",
-                  inputFilename,
-                  "-c",
-                  "copy",
-                  "-y",
-                  outputName,
-                ];
-              }
-              break;
-            }
-
-            case "speed": {
-              const speedValue = this.getNodeParameter(
-                "speedValue",
-                i,
-              ) as string;
-              const adjustAudioPitch = this.getNodeParameter(
-                "adjustAudioPitch",
-                i,
-              ) as boolean;
-              const speedOutputFormat = this.getNodeParameter(
-                "speedOutputFormat",
-                i,
-              ) as string;
-              const speed = parseFloat(speedValue);
-              outputExt = normalizeExtension(speedOutputFormat);
-              const outputName = `${outputFilename}${outputExt}`;
-              const videoFilter = `setpts=${1 / speed}*PTS`;
-
-              if (adjustAudioPitch) {
-                const audioFilter = buildAtempoFilter(speed);
-                ffmpegCommand = [
-                  "-i",
-                  inputFilename,
-                  "-vf",
-                  videoFilter,
-                  "-af",
-                  audioFilter,
-                  "-y",
-                  outputName,
-                ];
-              } else {
-                ffmpegCommand = [
-                  "-i",
-                  inputFilename,
-                  "-vf",
-                  videoFilter,
-                  "-an",
-                  "-y",
-                  outputName,
-                ];
-              }
-              break;
-            }
-
-            case "rotate": {
-              const rotation = this.getNodeParameter(
-                "rotation",
-                i,
-              ) as string;
-              const flipHorizontal = this.getNodeParameter(
-                "flipHorizontal",
-                i,
-              ) as boolean;
-              const flipVertical = this.getNodeParameter(
-                "flipVertical",
-                i,
-              ) as boolean;
-              const rotateOutputFormat = this.getNodeParameter(
-                "rotateOutputFormat",
-                i,
-              ) as string;
-
-              const vfParts: string[] = [];
-              switch (rotation) {
-                case "90":
-                  vfParts.push("transpose=1");
-                  break;
-                case "270":
-                  vfParts.push("transpose=2");
-                  break;
-                case "180":
-                  vfParts.push("transpose=1");
-                  vfParts.push("transpose=1");
-                  break;
-                case "0":
-                default:
-                  break;
-              }
-              if (flipHorizontal) {
-                vfParts.push("hflip");
-              }
-              if (flipVertical) {
-                vfParts.push("vflip");
-              }
-
-              outputExt = normalizeExtension(rotateOutputFormat);
-              const outputName = `${outputFilename}${outputExt}`;
-
-              if (vfParts.length > 0) {
-                ffmpegCommand = [
-                  "-i",
-                  inputFilename,
-                  "-vf",
-                  vfParts.join(","),
-                  "-c:a",
-                  "copy",
-                  "-y",
-                  outputName,
-                ];
-              } else {
-                ffmpegCommand = [
-                  "-i",
-                  inputFilename,
-                  "-c",
-                  "copy",
-                  "-y",
-                  outputName,
-                ];
-              }
-              break;
-            }
-
-            case "audioMix": {
-              const audioBinaryProperties = this.getNodeParameter(
-                "audioBinaryProperties",
-                i,
-              ) as string;
-              const audioMixOutputFormat = this.getNodeParameter(
-                "audioMixOutputFormat",
-                i,
-              ) as string;
-
-              const binaryProps = audioBinaryProperties
-                .split(",")
-                .map((p) => p.trim())
-                .filter((p) => p.length > 0);
-
-              if (binaryProps.length < 2) {
-                throw new Error(
-                  "At least 2 audio binary properties are required for mixing",
-                );
-              }
-
-              const inputFiles: string[] = [];
-              for (let j = 0; j < binaryProps.length; j++) {
-                const propName = binaryProps[j];
-                const propBinary = items[i].binary?.[propName];
-                const ext = propBinary
-                  ? getInputExtension(propBinary)
-                  : ".wav";
-                const audioData =
-                  await this.helpers.getBinaryDataBuffer(i, propName);
-                const inputName = `audio_input_${i}_${j}_${Date.now()}${ext}`;
-                ffmpeg.FS("writeFile", inputName, new Uint8Array(audioData));
-                inputFiles.push(inputName);
-              }
-
-              outputExt = normalizeExtension(audioMixOutputFormat);
-              const outputName = `${outputFilename}${outputExt}`;
-
-              const filterComplex =
-                inputFiles.map((_f, idx) => `[${idx}:a]`).join("") +
-                `amix=inputs=${inputFiles.length}:duration=longest[aout]`;
-
-              const inputs: string[] = [];
-              for (const f of inputFiles) {
-                inputs.push("-i", f);
-              }
-
-              ffmpegCommand = [
-                ...inputs,
-                "-filter_complex",
-                filterComplex,
-                "-map",
-                "[aout]",
-                "-y",
-                outputName,
-              ];
-              break;
-            }
-
-            case "audioFilters": {
-              const volume = this.getNodeParameter(
-                "volume",
-                i,
-              ) as number;
-              const bassBoost = this.getNodeParameter(
-                "bassBoost",
-                i,
-              ) as number;
-              const trebleBoost = this.getNodeParameter(
-                "trebleBoost",
-                i,
-              ) as number;
-              const highPass = this.getNodeParameter(
-                "highPass",
-                i,
-              ) as number;
-              const lowPass = this.getNodeParameter(
-                "lowPass",
-                i,
-              ) as number;
-              const audioFiltersOutputFormat = this.getNodeParameter(
-                "audioFiltersOutputFormat",
-                i,
-              ) as string;
-
-              const afFilters: string[] = [];
-              if (volume !== 1.0) afFilters.push(`volume=${volume}`);
-              if (bassBoost > 0)
-                afFilters.push(`bass=g=${bassBoost}`);
-              if (trebleBoost > 0)
-                afFilters.push(`treble=g=${trebleBoost}`);
-              if (highPass > 0)
-                afFilters.push(`highpass=f=${highPass}`);
-              if (lowPass > 0)
-                afFilters.push(`lowpass=f=${lowPass}`);
-
-              outputExt = normalizeExtension(audioFiltersOutputFormat);
-              const outputName = `${outputFilename}${outputExt}`;
-
-              if (afFilters.length > 0) {
-                ffmpegCommand = [
-                  "-i",
-                  inputFilename,
-                  "-af",
-                  afFilters.join(","),
-                  "-y",
-                  outputName,
-                ];
-              } else {
-                ffmpegCommand = [
-                  "-i",
-                  inputFilename,
-                  "-c:a",
-                  "copy",
-                  "-y",
-                  outputName,
-                ];
-              }
-              break;
-            }
-
-            case "audioNormalize": {
-              const targetLoudness = this.getNodeParameter(
-                "targetLoudness",
-                i,
-              ) as number;
-              const truePeak = this.getNodeParameter(
-                "truePeak",
-                i,
-              ) as number;
-              const audioNormalizeOutputFormat = this.getNodeParameter(
-                "audioNormalizeOutputFormat",
-                i,
-              ) as string;
-
-              outputExt = normalizeExtension(
-                audioNormalizeOutputFormat,
-              );
-              const outputName = `${outputFilename}${outputExt}`;
-
-              ffmpegCommand = [
-                "-i",
-                inputFilename,
-                "-af",
-                `loudnorm=I=${targetLoudness}:TP=${truePeak}:LRA=11`,
-                "-y",
-                outputName,
-              ];
-              break;
-            }
-
-            case "overlay": {
-              const overlayBinaryProperty = this.getNodeParameter(
-                "overlayBinaryProperty",
-                i,
-              ) as string;
-              const overlayType = this.getNodeParameter(
-                "overlayType",
-                i,
-              ) as string;
-              const overlayX = this.getNodeParameter(
-                "overlayX",
-                i,
-              ) as string;
-              const overlayY = this.getNodeParameter(
-                "overlayY",
-                i,
-              ) as string;
-              const overlayWidth = this.getNodeParameter(
-                "overlayWidth",
-                i,
-              ) as number;
-              const overlayHeight = this.getNodeParameter(
-                "overlayHeight",
-                i,
-              ) as number;
-              const overlayOpacity = this.getNodeParameter(
-                "overlayOpacity",
-                i,
-              ) as number;
-              const overlayOutputFormat = this.getNodeParameter(
-                "overlayOutputFormat",
-                i,
-              ) as string;
-
-              const overlayBin =
-                items[i].binary?.[overlayBinaryProperty];
-              const overlayExt = overlayBin
-                ? getInputExtension(overlayBin)
-                : ".png";
-              const overlayData =
-                await this.helpers.getBinaryDataBuffer(
-                  i,
-                  overlayBinaryProperty,
-                );
-              const overlayFilename = `overlay_${i}_${Date.now()}${overlayExt}`;
-              ffmpeg.FS("writeFile", overlayFilename, new Uint8Array(overlayData));
-
-              outputExt = normalizeExtension(overlayOutputFormat);
-              const outputName = `${outputFilename}${outputExt}`;
-
-              let videoFilter = "";
-              if (overlayWidth > 0 || overlayHeight > 0) {
-                const wStr =
-                  overlayWidth > 0
-                    ? overlayWidth.toString()
-                    : "-1";
-                const hStr =
-                  overlayHeight > 0
-                    ? overlayHeight.toString()
-                    : "-1";
-                videoFilter = `[1:v]scale=${wStr}:${hStr}`;
-                if (overlayOpacity < 1.0) {
-                  videoFilter += `,format=rgba,colorchannelmixer=aa=${overlayOpacity}`;
-                }
-                videoFilter += `[ovrl];[0:v][ovrl]overlay=${overlayX}:${overlayY}[outv]`;
-              } else {
-                if (overlayOpacity < 1.0) {
-                  videoFilter = `[1:v]format=rgba,colorchannelmixer=aa=${overlayOpacity}[ovrl];[0:v][ovrl]overlay=${overlayX}:${overlayY}[outv]`;
-                } else {
-                  videoFilter = `[0:v][1:v]overlay=${overlayX}:${overlayY}[outv]`;
-                }
-              }
-
-              if (overlayType === "pip") {
-                const fullFilter = `${videoFilter};[0:a][1:a]amix=inputs=2:duration=first[outa]`;
-                ffmpegCommand = [
-                  "-i",
-                  inputFilename,
-                  "-i",
-                  overlayFilename,
-                  "-filter_complex",
-                  fullFilter,
-                  "-map",
-                  "[outv]",
-                  "-map",
-                  "[outa]",
-                  "-y",
-                  outputName,
-                ];
-              } else {
-                ffmpegCommand = [
-                  "-i",
-                  inputFilename,
-                  "-i",
-                  overlayFilename,
-                  "-filter_complex",
-                  videoFilter,
-                  "-map",
-                  "[outv]",
-                  "-map",
-                  "0:a?",
-                  "-c:a",
-                  "copy",
-                  "-y",
-                  outputName,
-                ];
-              }
-              break;
-            }
-
-            case "subtitle": {
-              const subtitleBinaryProperty = this.getNodeParameter(
-                "subtitleBinaryProperty",
-                i,
-              ) as string;
-              const subtitleFormat = this.getNodeParameter(
-                "subtitleFormat",
-                i,
-              ) as string;
-              const subtitleFontSize = this.getNodeParameter(
-                "subtitleFontSize",
-                i,
-              ) as number;
-              const subtitleFontColor = this.getNodeParameter(
-                "subtitleFontColor",
-                i,
-              ) as string;
-              const subtitleBgOpacity = this.getNodeParameter(
-                "subtitleBgOpacity",
-                i,
-              ) as number;
-              const subtitlePosition = this.getNodeParameter(
-                "subtitlePosition",
-                i,
-              ) as string;
-              const subtitleOutputFormat = this.getNodeParameter(
-                "subtitleOutputFormat",
-                i,
-              ) as string;
-
-              const subtitleData =
-                await this.helpers.getBinaryDataBuffer(
-                  i,
-                  subtitleBinaryProperty,
-                );
-              const subtitleFilename = `subtitle_${i}_${Date.now()}.${subtitleFormat}`;
-              ffmpeg.FS("writeFile", subtitleFilename, new Uint8Array(subtitleData));
-
-              outputExt = normalizeExtension(subtitleOutputFormat);
-              const outputName = `${outputFilename}${outputExt}`;
-
-              const assColor = colorToAssFormat(subtitleFontColor);
-
-              let alignment = "2";
-              if (subtitlePosition === "top") {
-                alignment = "6";
-              } else if (subtitlePosition === "center") {
-                alignment = "5";
-              }
-
-              let subtitleFilter = "";
-              if (subtitleBgOpacity > 0) {
-                const alphaHex = Math.round(subtitleBgOpacity * 255)
-                  .toString(16)
-                  .padStart(2, "0")
-                  .toUpperCase();
-                subtitleFilter = `subtitles=${subtitleFilename}:force_style='FontSize=${subtitleFontSize},PrimaryColour=${assColor},Alignment=${alignment},OutlineColour=&H00000000&,Outline=1,BorderStyle=4,BackColour=&H${alphaHex}000000&'`;
-              } else {
-                subtitleFilter = `subtitles=${subtitleFilename}:force_style='FontSize=${subtitleFontSize},PrimaryColour=${assColor},Alignment=${alignment}'`;
-              }
-
-              ffmpegCommand = [
-                "-i",
-                inputFilename,
-                "-vf",
-                subtitleFilter,
-                "-c:a",
-                "copy",
-                "-y",
-                outputName,
-              ];
-              break;
-            }
-
-            case "gif": {
-              const gifOutputFormat = this.getNodeParameter(
-                "gifOutputFormat",
-                i,
-              ) as string;
-              const gifWidth = this.getNodeParameter(
-                "gifWidth",
-                i,
-              ) as number;
-              const gifHeight = this.getNodeParameter(
-                "gifHeight",
-                i,
-              ) as number;
-              const gifFps = this.getNodeParameter(
-                "gifFps",
-                i,
-              ) as number;
-              const gifStartTime = this.getNodeParameter(
-                "gifStartTime",
-                i,
-              ) as string;
-              const gifDuration = this.getNodeParameter(
-                "gifDuration",
-                i,
-              ) as string;
-              const gifColors = this.getNodeParameter(
-                "gifColors",
-                i,
-              ) as number;
-              const gifDither = this.getNodeParameter(
-                "gifDither",
-                i,
-              ) as string;
-              const gifLoop = this.getNodeParameter(
-                "gifLoop",
-                i,
-              ) as boolean;
-
-              outputExt = `.${gifOutputFormat}`;
-              const outputName = `${outputFilename}${outputExt}`;
-
-              const wStr =
-                gifWidth > 0 ? gifWidth.toString() : "-1";
-              const hStr =
-                gifHeight > 0 ? gifHeight.toString() : "-1";
-              const scaleFilter = `fps=${gifFps},scale=${wStr}:${hStr}:flags=lanczos`;
-
-              if (gifOutputFormat === "gif") {
-                const loopValue = gifLoop ? "0" : "-1";
-                const gifFilter = `[0:v]${scaleFilter},split[s0][s1];[s0]palettegen=max_colors=${gifColors}[p];[s1][p]paletteuse=dither=${gifDither}`;
-                ffmpegCommand = [
-                  "-ss",
-                  gifStartTime,
-                  "-t",
-                  gifDuration,
-                  "-i",
-                  inputFilename,
-                  "-filter_complex",
-                  gifFilter,
-                  "-loop",
-                  loopValue,
-                  "-y",
-                  outputName,
-                ];
-              } else {
-                const loopValue = gifLoop ? "0" : "1";
-                ffmpegCommand = [
-                  "-ss",
-                  gifStartTime,
-                  "-t",
-                  gifDuration,
-                  "-i",
-                  inputFilename,
-                  "-vf",
-                  scaleFilter,
-                  "-loop",
-                  loopValue,
-                  "-y",
-                  outputName,
-                ];
-              }
-              break;
-            }
-
-            case "imageSequence": {
-              const sequenceOutputFormat = this.getNodeParameter(
-                "sequenceOutputFormat",
-                i,
-              ) as string;
-              const sequenceWidth = this.getNodeParameter(
-                "sequenceWidth",
-                i,
-              ) as number;
-              const sequenceHeight = this.getNodeParameter(
-                "sequenceHeight",
-                i,
-              ) as number;
-              const sequenceFps = this.getNodeParameter(
-                "sequenceFps",
-                i,
-              ) as number;
-              const sequenceStartTime = this.getNodeParameter(
-                "sequenceStartTime",
-                i,
-              ) as string;
-              const sequenceDuration = this.getNodeParameter(
-                "sequenceDuration",
-                i,
-              ) as string;
-              const sequenceQuality = this.getNodeParameter(
-                "sequenceQuality",
-                i,
-              ) as number;
-
-              const outputPattern = `frame_%04d.${sequenceOutputFormat}`;
-
-              const wStr =
-                sequenceWidth > 0
-                  ? sequenceWidth.toString()
-                  : "-1";
-              const hStr =
-                sequenceHeight > 0
-                  ? sequenceHeight.toString()
-                  : "-1";
-              const vfFilter = `fps=1/${sequenceFps},scale=${wStr}:${hStr}`;
-
-              const cmdArgs: string[] = ["-ss", sequenceStartTime];
-              if (sequenceDuration && sequenceDuration.length > 0) {
-                cmdArgs.push("-t", sequenceDuration);
-              }
-              cmdArgs.push("-i", inputFilename, "-vf", vfFilter);
-
-              if (
-                sequenceOutputFormat === "jpg" ||
-                sequenceOutputFormat === "jpeg"
-              ) {
-                cmdArgs.push(
-                  "-q:v",
-                  Math.round(
-                    ((100 - sequenceQuality) / 100) * 31,
-                  ).toString(),
-                );
-              } else if (sequenceOutputFormat === "webp") {
-                cmdArgs.push("-q:v", sequenceQuality.toString());
-              }
-
-              cmdArgs.push("-y", outputPattern);
-              ffmpegCommand = cmdArgs;
-
-              const seqTimeoutMs =
-                (additionalOptions.timeout || 300) * 1000;
-              lastLogOutput = "";
-              await Promise.race([
-                ffmpeg.run(...ffmpegCommand),
-                new Promise<never>((_, reject) =>
-                  setTimeout(
-                    () =>
-                      reject(
-                        new Error(
-                          `FFmpeg timed out after ${additionalOptions.timeout || 300}s`,
-                        ),
-                      ),
-                    seqTimeoutMs,
-                  ),
-                ),
-              ]);
-
-              const mimeType =
-                getMimeTypeFromExtension(sequenceOutputFormat);
-              let frameIndex = 1;
-              while (true) {
-                const frameName = `frame_${String(frameIndex).padStart(4, "0")}.${sequenceOutputFormat}`;
-                try {
-                  const frameData = ffmpeg.FS("readFile", frameName) as Uint8Array;
-                  returnData.push({
-                    json: {
-                      ...items[i].json,
-                      ffmpeg: {
-                        operation,
-                        inputFilename:
-                          binaryData.fileName || "input",
-                        outputFilename: frameName,
-                        frameIndex,
-                        size: frameData.length,
-                      },
-                    },
-                    binary: {
-                      [outputBinaryPropertyName]: {
-                        data: Buffer.from(frameData).toString(
-                          "base64",
-                        ),
-                        fileName: frameName,
-                        mimeType,
-                      },
-                    },
-                  });
-                  try {
-                    ffmpeg.FS("unlink", frameName);
-                  } catch {}
-                  frameIndex++;
-                } catch {
-                  break;
-                }
-              }
-
-              try {
-                ffmpeg.FS("unlink", inputFilename);
-              } catch {}
-              continue;
-            }
-
-            case "remux": {
-              const remuxOutputFormat = this.getNodeParameter(
-                "remuxOutputFormat",
-                i,
-              ) as string;
-              outputExt = normalizeExtension(remuxOutputFormat);
-              const outputName = `${outputFilename}${outputExt}`;
-              ffmpegCommand = [
-                "-i",
-                inputFilename,
-                "-c",
-                "copy",
-                "-y",
-                outputName,
-              ];
-              break;
-            }
-
-            case "socialMedia": {
-              const presetKey = this.getNodeParameter(
-                "socialMediaPreset",
-                i,
-              ) as string;
-              const preset = SOCIAL_MEDIA_PRESETS[presetKey];
-              if (!preset) {
-                throw new Error(
-                  `Unknown social media preset: ${presetKey}`,
-                );
-              }
-
-              outputExt = ".mp4";
-              const outputName = `${outputFilename}${outputExt}`;
-
-              ffmpegCommand = [
-                "-i",
-                inputFilename,
-                "-vf",
-                `scale=${preset.width}:${preset.height}:force_original_aspect_ratio=decrease,pad=${preset.width}:${preset.height}:(ow-iw)/2:(oh-ih)/2`,
-                "-r",
-                preset.fps.toString(),
-                "-c:v",
-                "libx264",
-                "-b:v",
-                preset.videoBitrate,
-                "-c:a",
-                "aac",
-                "-b:a",
-                preset.audioBitrate,
-                "-movflags",
-                "+faststart",
-              ];
-              if (preset.maxDuration) {
-                ffmpegCommand.push(
-                  "-t",
-                  preset.maxDuration.toString(),
-                );
-              }
-              ffmpegCommand.push("-y", outputName);
-              break;
-            }
-
-            case "compressToSize": {
-              const targetSizeMB = this.getNodeParameter(
-                "targetSizeMB",
-                i,
-              ) as number;
-              const compressAudioBitrate = this.getNodeParameter(
-                "compressAudioBitrate",
-                i,
-              ) as string;
-              const compressOutputFormat = this.getNodeParameter(
-                "compressOutputFormat",
-                i,
-              ) as string;
-
-              outputExt = normalizeExtension(compressOutputFormat);
-              const outputName = `${outputFilename}${outputExt}`;
-
-              lastLogOutput = "";
-              try {
-                await Promise.race([
-                  ffmpeg.run("-i", inputFilename, "-hide_banner"),
-                  new Promise<void>((resolve) => setTimeout(resolve, 10000)),
-                ]);
-              } catch {
-                // Expected: ffmpeg exits with error when no output is specified
-              }
-              const meta = parseMetadataFromLogs(lastLogOutput);
-              const durationSec = meta.durationSeconds || 60;
-
-              const audioBitrateKbps =
-                parseInt(compressAudioBitrate) || 128;
-              const targetBitsPerSec =
-                (targetSizeMB * 8 * 1024 * 1024) / durationSec;
-              const videoBitrate = Math.max(
-                100,
-                Math.floor(targetBitsPerSec / 1000 - audioBitrateKbps),
-              );
-
-              ffmpegCommand = [
-                "-i",
-                inputFilename,
-                "-c:v",
-                "libx264",
-                "-b:v",
-                `${videoBitrate}k`,
-                "-maxrate",
-                `${Math.floor(videoBitrate * 1.5)}k`,
-                "-bufsize",
-                `${videoBitrate * 2}k`,
-                "-c:a",
-                "aac",
-                "-b:a",
-                compressAudioBitrate,
-                "-movflags",
-                "+faststart",
-                "-y",
-                outputName,
-              ];
-              break;
-            }
-
-            default:
-              throw new Error(`Unknown operation: ${operation}`);
+              }),
+            ]);
+            clearTimeout(seqTimeoutId!);
+
+            const frameResults = readImageSequenceFrames(
+              ffmpeg,
+              result.outputFormat,
+              outputBinaryPropertyName,
+              items[i].json,
+              binaryData.fileName || "input",
+            );
+            returnData.push(...frameResults);
+
+            safeUnlink(ffmpeg, inputFilename);
+            for (const f of result.tempFiles) safeUnlink(ffmpeg, f);
+            continue;
           }
 
+          // ── Trim (inline: uses -c copy, no encoding) ──
+          let commandResult: CommandResult;
+          if (operation === "trim") {
+            const startTime = this.getNodeParameter("startTime", i) as string;
+            const endTime = this.getNodeParameter("endTime", i) as string;
+            const duration = this.getNodeParameter("duration", i) as string;
+            const outputExt = ".mp4";
+            const outputName = `${outputFilename}${outputExt}`;
+            const command = ["-i", inputFilename, "-ss", startTime];
+            if (duration) {
+              command.push("-t", duration);
+            } else if (endTime) {
+              command.push("-to", endTime);
+            }
+            command.push("-c", "copy", "-y", outputName);
+            commandResult = { command, outputExt, tempFiles: [] };
+          } else {
+            // ── All other operations ──
+            const handler = OPERATION_HANDLERS[operation];
+            if (!handler) {
+              throw new Error(`Unknown operation: ${operation}`);
+            }
+            commandResult = await handler(handlerParams);
+          }
+
+          // Add -movflags +faststart for MP4 outputs that don't already have it
+          if (
+            commandResult.outputExt === ".mp4" &&
+            !commandResult.command.includes("-movflags")
+          ) {
+            const yIdx = commandResult.command.indexOf("-y");
+            if (yIdx !== -1) {
+              commandResult.command.splice(
+                yIdx,
+                0,
+                "-movflags",
+                "+faststart",
+              );
+            }
+          }
+
+          // Run FFmpeg with timeout (and clear timer on success)
           const timeoutMs =
             (additionalOptions.timeout || 300) * 1000;
-          lastLogOutput = "";
+          resetLog();
+
+          let timeoutId: ReturnType<typeof setTimeout>;
           await Promise.race([
-            ffmpeg.run(...ffmpegCommand),
-            new Promise<never>((_, reject) =>
-              setTimeout(
+            ffmpeg.run(...commandResult.command),
+            new Promise<never>((_, reject) => {
+              timeoutId = setTimeout(
                 () =>
                   reject(
                     new Error(
@@ -2307,15 +1324,16 @@ export class FFmpegWasm implements INodeType {
                     ),
                   ),
                 timeoutMs,
-              ),
-            ),
+              );
+            }),
           ]);
+          clearTimeout(timeoutId!);
 
-          const outputName = `${outputFilename}${outputExt}`;
+          const outputName = `${outputFilename}${commandResult.outputExt}`;
           const outputData = ffmpeg.FS("readFile", outputName) as Uint8Array;
 
           const outputMimeType = getMimeTypeFromExtension(
-            outputExt.replace(".", ""),
+            commandResult.outputExt.replace(".", ""),
           );
 
           const outputItem: INodeExecutionData = {
@@ -2339,10 +1357,10 @@ export class FFmpegWasm implements INodeType {
 
           returnData.push(outputItem);
 
-          try {
-            ffmpeg.FS("unlink", inputFilename);
-            ffmpeg.FS("unlink", outputName);
-          } catch {}
+          // Clean up all files written to WASM filesystem
+          safeUnlink(ffmpeg, inputFilename);
+          safeUnlink(ffmpeg, outputName);
+          for (const f of commandResult.tempFiles) safeUnlink(ffmpeg, f);
         } catch (error) {
           if (this.continueOnFail()) {
             returnData.push({
@@ -2369,3 +1387,36 @@ export class FFmpegWasm implements INodeType {
     return [returnData];
   }
 }
+
+function safeUnlink(
+  ffmpeg: { FS(method: string, ...args: unknown[]): unknown },
+  filename: string,
+): void {
+  try {
+    ffmpeg.FS("unlink", filename);
+  } catch {}
+}
+
+const OPERATION_HANDLERS: Record<
+  string,
+  (p: HandlerParams) => Promise<CommandResult>
+> = {
+  convert: handleConvert,
+  extractAudio: handleExtractAudio,
+  resize: handleResize,
+  thumbnail: handleThumbnail,
+  custom: handleCustom,
+  merge: handleMerge,
+  videoFilters: handleVideoFilters,
+  speed: handleSpeed,
+  rotate: handleRotate,
+  audioMix: handleAudioMix,
+  audioFilters: handleAudioFilters,
+  audioNormalize: handleAudioNormalize,
+  overlay: handleOverlay,
+  subtitle: handleSubtitle,
+  gif: handleGif,
+  remux: handleRemux,
+  socialMedia: handleSocialMedia,
+  compressToSize: handleCompressToSize,
+};
