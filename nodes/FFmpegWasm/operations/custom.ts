@@ -1,7 +1,7 @@
 import { normalizeExtension } from "../helpers";
 import type { HandlerParams, CommandResult } from "../types";
 
-const BLOCKED_PATTERNS = [/\.\.\//g, /\/\.\.\//g];
+const BLOCKED_PATTERNS = [/\.\.\//, /\/\.\.\//];
 
 export async function handleCustom(
   p: HandlerParams,

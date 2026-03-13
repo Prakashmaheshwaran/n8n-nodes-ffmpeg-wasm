@@ -17,8 +17,8 @@ const MIME_TYPE_MAP: Record<string, string> = {
   ".m4a": "audio/mp4",
   ".wma": "audio/x-ms-wma",
   ".opus": "audio/opus",
-  ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
   ".png": "image/png",
   ".gif": "image/gif",
   ".webp": "image/webp",
@@ -26,32 +26,10 @@ const MIME_TYPE_MAP: Record<string, string> = {
   ".tiff": "image/tiff",
 };
 
-const EXTENSION_FROM_MIME: Record<string, string> = {
-  "video/mp4": ".mp4",
-  "video/webm": ".webm",
-  "video/x-msvideo": ".avi",
-  "video/quicktime": ".mov",
-  "video/x-matroska": ".mkv",
-  "video/x-flv": ".flv",
-  "video/x-ms-wmv": ".wmv",
-  "video/x-m4v": ".m4v",
-  "video/3gpp": ".3gp",
-  "video/mp2t": ".ts",
-  "audio/mpeg": ".mp3",
-  "audio/aac": ".aac",
-  "audio/wav": ".wav",
-  "audio/ogg": ".ogg",
-  "audio/flac": ".flac",
-  "audio/mp4": ".m4a",
-  "audio/x-ms-wma": ".wma",
-  "audio/opus": ".opus",
-  "image/jpeg": ".jpg",
-  "image/png": ".png",
-  "image/gif": ".gif",
-  "image/webp": ".webp",
-  "image/bmp": ".bmp",
-  "image/tiff": ".tiff",
-};
+// Derive the reverse mapping so the two maps never go out of sync.
+const EXTENSION_FROM_MIME: Record<string, string> = Object.fromEntries(
+  Object.entries(MIME_TYPE_MAP).map(([ext, mime]) => [mime, ext]),
+);
 
 export function getMimeTypeFromExtension(ext: string): string {
   const normalized = ext.startsWith(".")
