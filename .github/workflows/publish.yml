@@ -1,0 +1,52 @@
+name: Publish to npm with Provenance
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'package.json'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Check if version changed
+        id: version-check
+        if: github.event_name == 'push'
+        run: |
+          PUBLISHED=$(npm view "$(jq -r .name package.json)" version 2>/dev/null || echo "0.0.0")
+          CURRENT=$(jq -r .version package.json)
+          if [ "$PUBLISHED" = "$CURRENT" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Version $CURRENT already published — skipping."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Publishing $CURRENT (npm has $PUBLISHED)."
+          fi
+
+      - name: Install dependencies
+        if: steps.version-check.outputs.skip != 'true'
+        run: npm ci
+
+      - name: Build
+        if: steps.version-check.outputs.skip != 'true'
+        run: npm run build --if-present
+
+      - name: Publish with provenance
+        if: steps.version-check.outputs.skip != 'true'
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
