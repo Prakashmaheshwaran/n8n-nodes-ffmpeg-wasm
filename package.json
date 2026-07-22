@@ -60,7 +60,7 @@
     "@types/jest": "^30.0.0",
     "@typescript-eslint/parser": "^5.45.0",
     "eslint-plugin-n8n-nodes-base": "^1.11.0",
-    "gulp": "^4.0.2",
+    "gulp": "^5.0.1",
     "gulp-svgmin": "^4.1.0",
     "n8n-workflow": "^1.0.0",
     "prettier": "^2.7.1",
